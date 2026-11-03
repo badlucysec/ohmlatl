@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+PREFIX="$ROOT/podman/v6.1.4"
+RUNTIME="${XDG_RUNTIME_DIR:-/tmp}/ohmlatl-podman"
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/ohmlatl/podman"
+RUNROOT="$RUNTIME/storage-run"
+GRAPHROOT="$CACHE/storage"
+
+umask 077
+mkdir -p "$RUNTIME" "$RUNROOT" "$GRAPHROOT"
+
+CONF="$RUNTIME/containers.conf"
+STORAGE="$RUNTIME/storage.conf"
+sed "s|@PREFIX@|$PREFIX|g" "$ROOT/podman/containers.conf.in" > "$CONF"
+sed -e "s|@PREFIX@|$PREFIX|g" \
+    -e "s|@RUNROOT@|$RUNROOT|g" \
+    -e "s|@GRAPHROOT@|$GRAPHROOT|g" \
+    "$ROOT/podman/storage.conf.in" > "$STORAGE"
+
+export PATH="$PREFIX/usr/local/bin:$PATH"
+export CONTAINERS_CONF="$CONF"
+export CONTAINERS_STORAGE_CONF="$STORAGE"
+export CONTAINERS_REGISTRIES_CONF="$PREFIX/etc/containers/registries.conf"
+export CONTAINERS_REGISTRIES_CONFS="$PREFIX/etc/containers/registries.conf"
+export CONTAINERS_POLICY_JSON="$PREFIX/etc/containers/policy.json"
+export CONTAINERS_HELPER_BINARY_DIR="$PREFIX/usr/local/lib/podman"
+
+exec "$PREFIX/usr/local/bin/podman" "$@"

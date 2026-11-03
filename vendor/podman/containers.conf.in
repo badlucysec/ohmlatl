@@ -1,0 +1,5 @@
+[engine]
+cgroup_manager = "cgroupfs"
+events_logger = "file"
+helper_binaries_dir = ["@PREFIX@/usr/local/lib/podman", "@PREFIX@/usr/local/libexec/podman"]
+conmon_path = ["@PREFIX@/usr/local/lib/podman/conmon"]

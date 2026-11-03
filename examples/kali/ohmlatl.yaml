@@ -1,0 +1,18 @@
+format: 1
+name: kali-base
+
+build:
+  containerfile: Containerfile
+  tag: 2026-11-02
+
+user:
+  name: dev
+  uid: 1000
+  gid: 1000
+
+vm:
+  vcpus: 2
+  memory: 4GiB
+  disks:
+    - volume: work
+      mount: /home/dev/work

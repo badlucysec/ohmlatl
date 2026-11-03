@@ -1,0 +1,13 @@
+[Unit]
+Description=Podman auto-update service
+Documentation=man:podman-auto-update(1)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/podman auto-update
+ExecStartPost=/usr/local/bin/podman image prune -f
+
+[Install]
+WantedBy=default.target

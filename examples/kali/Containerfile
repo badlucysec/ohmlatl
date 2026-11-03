@@ -1,0 +1,27 @@
+# Kali Rolling guest base for ohmlatl.
+# Requirements: systemd as init, sshd, and the user declared in ohmlatl.yaml.
+# In a real build, pin the image by digest.
+FROM kalilinux/kali-rolling:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      systemd systemd-sysv dbus udev kmod iproute2 \
+      openssh-server ca-certificates chrony tzdata \
+      util-linux sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Prevent services from starting during apt in the build.
+RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
+    && chmod +x /usr/sbin/policy-rc.d
+
+RUN useradd -m -u 1000 -s /bin/bash dev
+
+RUN printf 'dev ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/90-dev \
+    && chmod 0440 /etc/sudoers.d/90-dev
+
+RUN systemctl enable serial-getty@ttyS0.service ssh.service chrony.service \
+    && systemctl mask getty@tty1.service \
+    && (systemctl mask systemd-timesyncd.service || true)
+
+CMD ["/bin/bash"]
