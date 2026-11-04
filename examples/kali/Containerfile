@@ -15,6 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       util-linux sudo libcap2-bin iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
+# Kali's iputils-ping no longer ships file capabilities; this one also shows that
+# capabilities survive the build.
+RUN setcap cap_net_raw+ep /usr/bin/ping
+
 # Guest clock from the host (ptp_kvm), also without internet.
 RUN mkdir -p /etc/chrony/conf.d \
     && printf 'refclock PHC /dev/ptp0 poll 3 dpoll -2 offset 0\n' \
