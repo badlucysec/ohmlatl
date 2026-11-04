@@ -5,15 +5,20 @@ FROM docker.io/kalilinux/kali-rolling:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      systemd systemd-sysv dbus udev kmod iproute2 \
-      openssh-server ca-certificates chrony tzdata \
-      util-linux sudo \
-    && rm -rf /var/lib/apt/lists/*
-
 # Prevent services from starting during apt in the build.
 RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
     && chmod +x /usr/sbin/policy-rc.d
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      systemd systemd-sysv dbus udev kmod iproute2 \
+      openssh-server ca-certificates chrony tzdata \
+      util-linux sudo libcap2-bin iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
+
+# Guest clock from the host (ptp_kvm), also without internet.
+RUN mkdir -p /etc/chrony/conf.d \
+    && printf 'refclock PHC /dev/ptp0 poll 3 dpoll -2 offset 0\n' \
+       > /etc/chrony/conf.d/ohmlatl-ptp.conf
 
 RUN useradd -m -u 1000 -s /bin/bash dev
 

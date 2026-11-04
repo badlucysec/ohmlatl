@@ -22,8 +22,8 @@ sed -e "s|@PREFIX@|$PREFIX|g" \
 export PATH="$PREFIX/usr/local/bin:$PATH"
 export CONTAINERS_CONF="$CONF"
 export CONTAINERS_STORAGE_CONF="$STORAGE"
-export CONTAINERS_REGISTRIES_CONF="$PREFIX/etc/containers/registries.conf"
-export CONTAINERS_REGISTRIES_CONFS="$PREFIX/etc/containers/registries.conf"
+export CONTAINERS_REGISTRIES_CONF="$ROOT/podman/registries.conf"
+export CONTAINERS_REGISTRIES_CONFS="$ROOT/podman/registries.conf"
 export CONTAINERS_POLICY_JSON="$PREFIX/etc/containers/policy.json"
 export CONTAINERS_HELPER_BINARY_DIR="$PREFIX/usr/local/lib/podman"
 

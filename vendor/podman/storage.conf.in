@@ -5,4 +5,3 @@ graphroot = "@GRAPHROOT@"
 
 [storage.options.overlay]
 mount_program = "@PREFIX@/usr/local/bin/fuse-overlayfs"
-ignore_chown_errors = "true"

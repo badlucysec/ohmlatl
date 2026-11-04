@@ -42,7 +42,7 @@ O último comando espera o tarball original, que não fica no repositório.
 
 ## Uso
 
-O wrapper `vendor/bin/podman` resolve os caminhos do bundle, gera a configuração em `$XDG_RUNTIME_DIR/ohmlatl-podman` e usa o storage em `$XDG_CACHE_HOME/ohmlatl/podman`, ou em `$HOME/.cache/ohmlatl/podman` quando `XDG_CACHE_HOME` não existe. Nada é instalado em `/usr/local`. O `ohmlatl` usa esse mesmo binário em `ohmlatl build` e `ohmlatl podman`.
+O wrapper `vendor/bin/podman` resolve os caminhos do bundle, gera a configuração em `$XDG_RUNTIME_DIR/ohmlatl-podman` a partir de `vendor/podman/*.conf.in`, usa `vendor/podman/registries.conf` (sem busca de nomes curtos: imagem remota precisa de nome qualificado, como `docker.io/...`) e usa o storage em `$XDG_CACHE_HOME/ohmlatl/podman`, ou em `$HOME/.cache/ohmlatl/podman` quando `XDG_CACHE_HOME` não existe. Nada é instalado em `/usr/local`. O `ohmlatl` usa esse mesmo binário em `ohmlatl build` e `ohmlatl podman`.
 
 ```bash
 export PATH="$PWD/vendor/bin:$PATH"
@@ -59,5 +59,5 @@ podman run --rm --network=none docker.io/library/alpine:3.20 echo ok
 
 - Os binários são só para `linux/x86_64`. Para `aarch64`, baixe os artefatos correspondentes.
 - O Podman static não tem integração com systemd. Ele serve para o build, não para rodar serviços no host.
-- Rootless no host ainda depende de `newuidmap`/`newgidmap`, subuid/subgid e `/dev/fuse`. O `ohmlatl doctor --build` deve validar isso.
+- Rootless no host ainda depende de `newuidmap`/`newgidmap`, pelo menos 65536 ids em subuid/subgid e `/dev/fuse`. O `ohmlatl doctor --build` deve validar isso. O storage não usa `ignore_chown_errors`: uma faixa de subuid pequena falha em vez de achatar os donos da imagem.
 - `vendor/` ocupa cerca de 100 MB e está versionado no Git para ser embutido no `ohmlatl`. Atualizações trocam binários e checksums no mesmo commit.
