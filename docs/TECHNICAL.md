@@ -252,7 +252,7 @@ podman unshare sh -euc '
 '
 ```
 
-3. Tamanho: `--size`, ou `max(32 GiB, 2 x conteúdo + 1 GiB)`, com o conteúdo em blocos alocados (`du -sB1` dentro do unshare); arredondado para cima até múltiplo de 1 MiB. O número de inodes do ext4 tem que ser pelo menos o dobro do número de arquivos; se não for, o build passa `-N`. O espaço livre no drive é conferido contra o que o build vai escrever.
+3. Tamanho: `--size`, ou `max(32 GiB, 2 x conteúdo + 1 GiB)`, com o conteúdo em blocos alocados (`du -sB1` dentro do unshare); arredondado para cima até múltiplo de 1 MiB. O número de inodes do ext4 tem que ser pelo menos o dobro do número de arquivos; se não for, o build passa `-N`. O espaço livre no drive é conferido contra o que o build vai escrever (conteúdo, tabelas de inode, journal e cabeçalho LUKS). Um `--size` menor que o conteúdo mais os metadados do ext4 é recusado aqui, antes da passphrase e do `sudo`.
 4. Passphrase: lida do TTY, com confirmação, uma vez. Recusa vazia e com `\n` ou `\r`. É escrita sem quebra de linha no stdin do `cryptsetup`.
 5. LUKS. Antes, `sudo -v`; durante o resto do build, um laço em segundo plano roda `sudo -n -v` a cada 60 s, para o sudo não pedir senha de novo no meio de um `mkfs` demorado:
 
@@ -288,7 +288,7 @@ sudo cryptsetup close ohmlatl-build-<id>
    O `chown` vem logo antes do `mkfs` porque o udev devolve o nó para `root:disk` quando o device é fechado. O `settle` espera só o nó do mapper (`--exit-if-exists`), não a fila inteira: o `cryptsetup open` com suporte a udev (a flag `UDEV` de `cryptsetup --version`, padrão nas distros) só retorna depois que as regras do mapper rodaram, e a fila inteira pode ficar ocupada por muito tempo por eventos de outros devices. Exemplo real: o `nfs-common` instala `99-nfs.rules`, que roda o `nfsrahead` em cada BDI novo; cada mount `fuse-overlayfs` do Podman rootless cria um, e o `nfsrahead` espera cerca de 10 s por cada um, então um `podman build` deixa a fila ocupada por minutos e um `settle` sem `-E` estoura o tempo. O que não foi escrito continua buraco no arquivo; o ext4 não lê blocos livres, então o conteúdo deles não importa. As tabelas de inode e o journal são escritos no build (cerca de 800 MiB num disco de 32 GiB).
 
 7. Gravar `$PART/manifest.yaml` (com `name` e `tag` finais) e `rename` de `$PART` para `images/<nome>/<tag>`, no mesmo filesystem, o que preserva o sparse. O arquivo `.<tag>.lock` fica ao lado; ele é só o objeto do `flock` e pode sobrar.
-8. Trap (sucesso ou falha): `podman unshare rm -rf "$BUILD"`, `cryptsetup close` se aberto, `rm -rf "$PART"` se não renomeado, `podman rm` do container, fim do laço do `sudo`.
+8. Trap (sucesso ou falha): `podman unshare rm -rf "$BUILD"`, `cryptsetup close` se aberto, `rm -rf "$PART"` se não renomeado, `podman rm` do container, `podman rmi` da imagem feita pelo `podman build` (com `-f`) se ela não tiver tag, fim do laço do `sudo`.
 
 Regras:
 
@@ -578,7 +578,7 @@ Limitações:
 
 Ferramentas de `sbin` (`mkfs.ext4`, `e2fsck`, `resize2fs`, `cryptsetup`, `udevadm`) são procuradas também em `/usr/sbin` e `/sbin`, além do `PATH`, porque várias distros não põem `sbin` no `PATH` do usuário comum; `doctor` e os comandos usam o caminho absoluto encontrado.
 
-Os dois conferem também o diretório do ohmlatl: filesystem ext4/btrfs/xfs, montagem sem `noexec` (aviso), dono de `images/` igual ao UID atual, sobras de build (`.partial` sem lock, mapper `ohmlatl-build-*`) e espaço livre. O `doctor --run` também mostra se a trava `inet ohmlatl-fwguard` está ativa.
+Os dois conferem também o diretório do ohmlatl: filesystem ext4/btrfs/xfs, montagem sem `noexec` (aviso), dono de `images/` igual ao UID atual, sobras de build e de resize (`.partial` sem lock, mapper `ohmlatl-build-*` ou `ohmlatl-resize-*`) e espaço livre. O `doctor --run` também mostra se a trava `inet ohmlatl-fwguard` está ativa.
 
 Falha imprime a correção sugerida e sai com código diferente de zero.
 

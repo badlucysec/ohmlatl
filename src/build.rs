@@ -131,6 +131,8 @@ fn written(content: u64, size: u64, inodes: u64) -> u64 {
 struct Cleanup {
     build: PathBuf,
     cid: Option<String>,
+    /// The image `podman build` made (with -f): removed if nothing else tagged it.
+    built: Option<String>,
     mapper: Option<String>,
     part: Option<PathBuf>,
     sudo: Option<util::Sudo>,
@@ -160,6 +162,15 @@ impl Cleanup {
             && let Ok(mut c) = assets::podman()
         {
             let _ = c.args(["rm", "-f", &cid]).stdout(Stdio::null()).status();
+        }
+        if let Some(id) = self.built.take()
+            && let Ok(mut c) = assets::podman()
+            && c.args(["image", "inspect", "--format", "{{len .RepoTags}}", &id])
+                .output()
+                .is_ok_and(|o| o.status.success() && o.stdout.trim_ascii() == b"0")
+            && let Ok(mut c) = assets::podman()
+        {
+            let _ = c.args(["rmi", &id]).stdout(Stdio::null()).status();
         }
         self.sudo.take();
     }
@@ -219,6 +230,7 @@ pub fn build(home_flag: Option<&Path>, o: Opts) -> Result<(), String> {
             .join("ohmlatl/build")
             .join(std::process::id().to_string()),
         cid: None,
+        built: None,
         mapper: None,
         part: None,
         sudo: None,
@@ -265,7 +277,9 @@ fn steps(
                 None,
             )?;
             let id = fs::read_to_string(&iid).map_err(|e| format!("{}: {e}", iid.display()))?;
-            id.trim().trim_start_matches("sha256:").to_string()
+            let id = id.trim().trim_start_matches("sha256:").to_string();
+            c.built = Some(id.clone());
+            id
         }
         None => o.from.clone().unwrap(),
     };
@@ -327,6 +341,14 @@ fn steps(
         }
     ));
     let need = written(content, size, n.unwrap_or(size / 16384));
+    if size < need - LUKS_OFFSET {
+        return Err(format!(
+            "--size {} is too small: {} of content plus ext4 metadata need about {}",
+            gib(size),
+            gib(content),
+            gib(need - LUKS_OFFSET)
+        ));
+    }
     let free = util::free_bytes(images).map_err(|e| format!("{}: {e}", images.display()))?;
     if need > free {
         return Err(format!(
@@ -364,7 +386,7 @@ fn steps(
     let part = dir.join(format!(".{tag}.partial"));
     if fs::symlink_metadata(&part).is_ok() {
         say(format!("removing leftover {}", part.display()));
-        doctor::clean_partial(&part, &doctor::build_mappers())
+        doctor::clean_partial(&part, &doctor::mappers())
             .map_err(|e| format!("{}: {e}", part.display()))?;
     }
     DirBuilder::new()
@@ -451,7 +473,8 @@ fn steps(
     if let Some(n) = n {
         mkfs.args(["-N", &n.to_string()]);
     }
-    util::run(mkfs.arg("-d").arg(c.build.join("root")).arg(&dev), None)?;
+    util::run(mkfs.arg("-d").arg(c.build.join("root")).arg(&dev), None)
+        .map_err(|_| "mkfs.ext4 failed (see its message above)")?;
     sudo(
         &[tool("e2fsck")?.as_os_str(), "-fn".as_ref(), dev.as_os_str()],
         None,
@@ -515,6 +538,9 @@ mod tests {
         // About 800 MiB of metadata on 32 GiB (TECHNICAL, step 6).
         let meta = written(0, 32 * GIB, 32 * GIB / 16384) - LUKS_OFFSET;
         assert_eq!(meta, 768 * MIB);
+        // --size 100M with 0.3 GiB of content is refused before the passphrase.
+        assert!(written(300 * MIB, 100 * MIB, 20_000) - LUKS_OFFSET > 100 * MIB);
+        assert!(written(300 * MIB, 32 * GIB, 32 * GIB / 16384) - LUKS_OFFSET < 32 * GIB);
     }
 
     #[test]

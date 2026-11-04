@@ -89,10 +89,11 @@ fn drive(r: &mut Report, home_flag: Option<&Path>, build: bool) {
     leftovers(r, &dir, build);
 }
 
-/// `.partial` directories of dead builds (lock free) and `ohmlatl-build-*` mappers.
+/// `.partial` directories of dead builds (lock free) and `ohmlatl-build-*`/`ohmlatl-resize-*`
+/// mappers.
 /// `doctor --build` cleans them under the build lock, like the next build would.
 fn leftovers(r: &mut Report, dir: &Path, clean: bool) {
-    let mappers = build_mappers();
+    let open = mappers();
     let mut found = false;
     for name in fs::read_dir(dir.join("images"))
         .into_iter()
@@ -131,7 +132,7 @@ fn leftovers(r: &mut Report, dir: &Path, clean: bool) {
                 );
                 continue;
             }
-            match clean_partial(&part, &mappers) {
+            match clean_partial(&part, &open) {
                 Ok(()) => r.ok(format!("removed leftover build {}", part.display())),
                 Err(e) => r.fail(
                     format!("{}: {e}", part.display()),
@@ -140,7 +141,7 @@ fn leftovers(r: &mut Report, dir: &Path, clean: bool) {
             }
         }
     }
-    for (m, backing) in build_mappers() {
+    for (m, backing) in mappers() {
         found = true;
         r.fail(
             format!("mapper {m} open (on {})", backing.display()),
@@ -164,8 +165,9 @@ pub fn clean_partial(part: &Path, mappers: &[(String, PathBuf)]) -> std::io::Res
     fs::remove_dir_all(part)
 }
 
-/// `ohmlatl-build-*` device-mapper names with the file behind their loop device.
-pub fn build_mappers() -> Vec<(String, PathBuf)> {
+/// `ohmlatl-build-*` and `ohmlatl-resize-*` device-mapper names with the file behind their loop
+/// device.
+pub fn mappers() -> Vec<(String, PathBuf)> {
     let mut out = vec![];
     for e in fs::read_dir("/sys/block").into_iter().flatten().flatten() {
         let p = e.path();
@@ -173,7 +175,7 @@ pub fn build_mappers() -> Vec<(String, PathBuf)> {
             continue;
         };
         let name = name.trim().to_string();
-        if !name.starts_with("ohmlatl-build-") {
+        if !name.starts_with("ohmlatl-build-") && !name.starts_with("ohmlatl-resize-") {
             continue;
         }
         let backing = fs::read_dir(p.join("slaves"))
