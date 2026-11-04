@@ -132,7 +132,7 @@ Dentro da VM, `ohmlatl-gateway:11434` é o Ollama do host e `ohmlatl-gateway:808
 
 ## Desenvolvimento
 
-O Firecracker e o jailer ficam em `vendor/`; o bundle Podman de lá é só para desenvolvimento e sai do repositório no P0:
+O Firecracker e o jailer ficam em `vendor/`. Para desenvolvimento, o `vendor/bin/podman` roda o bundle Podman que o `cargo xtask assets` gera em `assets/out/podman`:
 
 ```bash
 export PATH="$PWD/vendor/bin:$PATH"
@@ -144,7 +144,7 @@ Versões, checksums e limites estão em [vendor/README.md](../vendor/README.md).
 
 ## Status
 
-Pré-alfa. O repositório ainda é o scaffold Rust; os documentos descrevem o contrato de usabilidade e o plano. Comandos e detalhes podem mudar durante P0 a P2.
+Pré-alfa. O P0 está pronto: `init`, `doctor`, os binários embutidos e o boot de teste com Firecracker sob o jailer. O build de imagens (P1) e o runtime (P2) ainda não existem; os documentos descrevem o contrato de usabilidade e o plano. Comandos e detalhes podem mudar durante P1 e P2.
 
 ## Licença
 

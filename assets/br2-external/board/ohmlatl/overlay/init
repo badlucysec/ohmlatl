@@ -1,0 +1,38 @@
+#!/bin/sh
+# ohmlatl initramfs: unlock /dev/vda, check it, write DNS and the gateway name, switch_root.
+export PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
+mkdir -p /run/cryptsetup /newroot
+
+rescue() {
+	echo "ohmlatl: $1; starting rescue shell"
+	exec sh
+}
+
+cryptsetup open --tries 3 /dev/vda root || rescue "cannot unlock /dev/vda"
+e2fsck -p /dev/mapper/root
+[ $? -lt 4 ] || rescue "e2fsck failed on /dev/mapper/root"
+mount -t ext4 /dev/mapper/root /newroot || rescue "cannot mount /dev/mapper/root"
+
+# ip=<guest>::<gw>:<mask>:<name>:eth0:off
+gw=
+for arg in $(cat /proc/cmdline); do
+	case $arg in ip=*) gw=$(echo "${arg#ip=}" | cut -d: -f3) ;; esac
+done
+[ -n "$gw" ] || rescue "no gateway in ip= on the kernel command line"
+
+etc=/newroot/etc
+[ -L $etc/resolv.conf ] && rm -f $etc/resolv.conf
+printf 'nameserver %s\n' "$gw" > $etc/resolv.conf
+chmod 0644 $etc/resolv.conf
+{ grep -v ' # ohmlatl$' $etc/hosts 2>/dev/null; printf '%s ohmlatl-gateway # ohmlatl\n' "$gw"; } > /run/hosts
+cat /run/hosts > $etc/hosts
+chmod 0644 $etc/hosts
+rm -f /run/hosts
+
+for d in dev run sys proc; do mount -o move /$d /newroot/$d; done
+exec switch_root /newroot /sbin/init

@@ -1,0 +1,7 @@
+# Build environment for the guest kernel and initramfs (Buildroot).
+FROM docker.io/library/debian:bookworm@sha256:a0039cc6bb3eb2215aabcd3437cce8808a3858d86bf483eee2ee14fe4d2551c2
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bash bc binutils build-essential bzip2 ca-certificates cpio diffutils file \
+      findutils gawk gzip patch perl python3 rsync sed tar unzip wget xz-utils \
+ && rm -rf /var/lib/apt/lists/*

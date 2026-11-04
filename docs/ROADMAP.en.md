@@ -2,7 +2,7 @@
 
 🇺🇸 English · 🇧🇷 [Português](ROADMAP.pt-BR.md) · 🇪🇸 [Español](ROADMAP.es.md)
 
-Status: pre-implementation. The repository is still the Rust scaffold; this document is the plan that guides the next phases. Technical details are in `TECHNICAL.md` (pt-BR).
+Status: P0 done. This document is the plan that guides the next phases. Technical details are in `TECHNICAL.md` (pt-BR).
 
 ## Vision
 
@@ -354,7 +354,7 @@ Not planned in detail: backup/restore commands, `image import/export`, UDP forwa
 
 ## Items to confirm during implementation
 
-- Final kernel config fragment, after the P0 boot tests.
+- Final kernel config fragment: confirmed by the P0 boot tests, unchanged from the list in `TECHNICAL.md`.
 
 ## MVP criterion
 

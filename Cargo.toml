@@ -4,4 +4,12 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
+[workspace]
+members = ["xtask"]
+
 [dependencies]
+libc = "0.2.191"
+sha2 = "0.10"
+
+[build-dependencies]
+sha2 = "0.10"

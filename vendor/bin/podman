@@ -2,7 +2,8 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-PREFIX="$ROOT/podman/v6.1.4"
+PREFIX="$ROOT/../assets/out/podman"
+[ -x "$PREFIX/bin/podman" ] || { echo "vendor/bin/podman: no bundle in assets/out/podman; run cargo xtask assets with a host podman first" >&2; exit 1; }
 RUNTIME="${XDG_RUNTIME_DIR:-/tmp}/ohmlatl-podman"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/ohmlatl/podman"
 RUNROOT="$RUNTIME/run"
@@ -19,12 +20,12 @@ sed -e "s|@PREFIX@|$PREFIX|g" \
     -e "s|@GRAPHROOT@|$GRAPHROOT|g" \
     "$ROOT/podman/storage.conf.in" > "$STORAGE"
 
-export PATH="$PREFIX/usr/local/bin:$PATH"
+export PATH="$PREFIX/bin:$PATH"
 export CONTAINERS_CONF="$CONF"
 export CONTAINERS_STORAGE_CONF="$STORAGE"
 export CONTAINERS_REGISTRIES_CONF="$ROOT/podman/registries.conf"
 export CONTAINERS_REGISTRIES_CONFS="$ROOT/podman/registries.conf"
 export CONTAINERS_POLICY_JSON="$PREFIX/etc/containers/policy.json"
-export CONTAINERS_HELPER_BINARY_DIR="$PREFIX/usr/local/lib/podman"
+export CONTAINERS_HELPER_BINARY_DIR="$PREFIX/lib/podman"
 
-exec "$PREFIX/usr/local/bin/podman" "$@"
+exec "$PREFIX/bin/podman" "$@"

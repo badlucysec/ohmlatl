@@ -4,4 +4,4 @@ runroot = "@RUNROOT@"
 graphroot = "@GRAPHROOT@"
 
 [storage.options.overlay]
-mount_program = "@PREFIX@/usr/local/bin/fuse-overlayfs"
+mount_program = "@PREFIX@/bin/fuse-overlayfs"

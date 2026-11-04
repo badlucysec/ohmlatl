@@ -1,0 +1,4 @@
+# Buildroot LTS used by `cargo xtask assets`.
+version 2026.02.3
+url https://buildroot.org/downloads/buildroot-2026.02.3.tar.xz
+sha256 5a59e7501b0b4ec52c41f4bfa79412320e0b37eae5f719605a258e8d0c6fc7fb
