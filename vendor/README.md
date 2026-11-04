@@ -1,6 +1,6 @@
 # vendor
 
-Binários locais para desenvolvimento do `ohmlatl`. Eles são Linux x86_64 e ficam fora do runtime do host: o `ohmlatl` usa o Podman só no build e o Firecracker no P2.
+Binários locais para desenvolvimento do `ohmlatl`. Eles são Linux x86_64 e ficam fora do runtime do host: o `ohmlatl` usa o Podman só no build e o Firecracker a partir do P0.
 
 ## Firecracker
 
@@ -53,12 +53,6 @@ podman --version
 
 podman info
 podman run --rm --network=none docker.io/library/alpine:3.20 echo ok
-```
-
-Para usar outro storage:
-
-```bash
-XDG_CACHE_HOME=/mnt/vmdisk/cache ./vendor/bin/podman info
 ```
 
 ## Limites

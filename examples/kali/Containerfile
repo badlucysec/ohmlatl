@@ -1,7 +1,7 @@
 # Kali Rolling guest base for ohmlatl.
 # Requirements: systemd as init, sshd, and the user declared in ohmlatl.yaml.
 # In a real build, pin the image by digest.
-FROM kalilinux/kali-rolling:latest
+FROM docker.io/kalilinux/kali-rolling:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -22,6 +22,7 @@ RUN printf 'dev ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/90-dev \
 
 RUN systemctl enable serial-getty@ttyS0.service ssh.service chrony.service \
     && systemctl mask getty@tty1.service \
-    && (systemctl mask systemd-timesyncd.service || true)
+    && (systemctl mask systemd-timesyncd.service || true) \
+    && rm -f /usr/sbin/policy-rc.d
 
 CMD ["/bin/bash"]

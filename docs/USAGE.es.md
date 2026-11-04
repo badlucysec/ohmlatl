@@ -6,12 +6,12 @@ Este documento propone los flujos de uso de `ohmlatl` antes de la implementació
 
 ## Conceptos
 
-- **Imagen de disco**: un `rootfs.luks` (LUKS2 + integridad + ext4) más el `manifest.yaml` y la clave SSH usados en el build. Contiene todo el sistema, incluido `/home/<user>`. Se construye a partir de un `Containerfile` o de una imagen OCI.
-- **Volumen**: un disco ext4 extra, con o sin LUKS2. El manifest dice dónde lo monta la VM. Lo que deba sobrevivir a un rebuild vive en un volumen.
-- **VM**: una ejecución de una imagen, con volúmenes, recursos y red. Hay una VM por imagen, con el nombre de la imagen.
-- **Manifest**: `ohmlatl.yaml`. Declara el nombre de la imagen, el usuario, los recursos y los volúmenes.
-- **Supervisor**: proceso por VM que controla Firecracker, el PTY del serial y el log. No es un daemon global.
-- **Jailer**: el sandbox de Firecracker (chroot, namespaces, seccomp, cgroups). Requiere root para iniciar.
+- **Imagen de disco**: un `rootfs.luks` (LUKS2 + integrity + ext4) más el `manifest.yaml` y las claves SSH creadas con él. Guarda toda la computadora, incluido `/home/<user>`, y la VM escribe en él. Se genera a partir de un `Containerfile` o de una imagen OCI.
+- **VM**: una ejecución de una imagen, con recursos y red. Hay una VM por imagen, con el nombre de la imagen.
+- **Manifest**: `ohmlatl.yaml`. Declara el nombre de la imagen, el usuario, los recursos y la red.
+- **Forward**: un puerto TCP en el gateway de la VM que lleva a un servicio del host o a otra VM. Es la única salida de la VM además de internet, cuando está permitida.
+- **Supervisor**: una unidad de sistema por VM que controla Firecracker, el PTY del serial, la red y los forwards. No es un daemon global.
+- **Jailer**: el sandbox de Firecracker (chroot, namespaces, seccomp, cgroups).
 
 ## Instalación (fase inicial)
 
@@ -29,30 +29,16 @@ Resultado esperado:
 ohmlatl 0.1.0
 ```
 
-## 1. Prepara el disco
+Las imágenes y el estado de las VMs quedan en `~/.local/share/ohmlatl`.
 
-```bash
-ohmlatl init /mnt/vmdisk
-```
-
-El comando crea el layout y valida el filesystem. El disco debe ser ext4, btrfs o xfs, montado sin `noexec`; FAT/exFAT/NTFS no soportan discos dispersos.
-
-Resultado esperado:
-
-```text
-[ohmlatl] store: /mnt/vmdisk
-[ohmlatl] created bin/ images/ volumes/ vms/
-[ohmlatl] filesystem: ext4 (ok)
-```
-
-## 2. Revisa el host
+## 1. Verificar el host
 
 ```bash
 ohmlatl doctor --build
 ohmlatl doctor --run
 ```
 
-`--build` revisa Podman rootless, `/etc/subuid`, `/etc/subgid`, `newuidmap`, `/dev/fuse`, `e2fsprogs` y `cryptsetup` con integridad. `--run` revisa `/dev/kvm`, `/dev/net/tun`, `ip`, `nft`, cgroup v2, `sudo` y el cliente SSH.
+`--build` verifica Podman rootless, `/etc/subuid`, `/etc/subgid`, `newuidmap`, `/dev/fuse`, `e2fsprogs` y `cryptsetup` con integrity. `--run` verifica `/dev/kvm`, `/dev/net/tun`, `ip`, `nft`, cgroup v2, `systemd-run`, `sudo`, el cliente SSH y si Docker o ufw bloquean el forwarding.
 
 Resultado esperado (resumido):
 
@@ -68,17 +54,18 @@ RUN
   [ok] /dev/kvm accessible
   [ok] /dev/net/tun
   [ok] iproute2 + nftables
-  [ok] cgroup v2
+  [ok] systemd-run
   [ok] ssh client
+  [ok] forward policy
 ```
 
-Si algo falla, el comando muestra la corrección sugerida y sale con código distinto de cero.
+Si algo falla, el comando imprime la corrección sugerida y sale con código distinto de cero.
 
-## 3. Primer ejemplo: imagen de disco personalizada
+## 2. Primer ejemplo: imagen de disco personalizada
 
-El flujo que la mayoría querrá: correr un contenedor base, instalar x, y, z y convertir el resultado en una microVM. El ejemplo usa Kali Rolling; cambia la base si quieres.
+El flujo que la mayoría querrá: ejecutar un contenedor base, instalar x, y, z y convertir el resultado en una microVM. El ejemplo usa Kali Rolling; cambia la base si quieres.
 
-### 3.1 Base del guest
+### 2.1 Base del guest
 
 El `kalilinux/kali-rolling` puro no tiene systemd ni sshd. Usa la base del repositorio:
 
@@ -87,9 +74,9 @@ cd examples/kali
 ohmlatl build
 ```
 
-`ohmlatl build` lee el `Containerfile` declarado en `build.containerfile` y usa el Podman embebido. Produce la imagen de disco `kali-base:2026-11-02` y deja la imagen Podman con el mismo nombre para el siguiente paso. `name` y `build.tag` identifican el artefacto; sin tag, `latest`; `-t` lo sobrescribe.
+`ohmlatl build` lee el `Containerfile` declarado en `build.containerfile` y usa el Podman embebido. Produce la imagen de disco `kali-base:2026-11-02` y deja la imagen Podman con el mismo nombre para el siguiente paso. `name` y `build.tag` identifican el artefacto; sin tag, `latest`; `-t` sobrescribe.
 
-### 3.2 Explora e instala en el contenedor
+### 2.2 Explorar e instalar en el contenedor
 
 ```bash
 ohmlatl podman run --name kali-dev -it kali-base:2026-11-02
@@ -105,7 +92,7 @@ exit
 
 Reemplaza `x`, `y` y `z` por los paquetes que quieras.
 
-### 3.3 Genera la imagen de disco arrancable
+### 2.3 Generar la imagen de disco arrancable
 
 En el directorio del proyecto, con el `ohmlatl.yaml` del ejemplo:
 
@@ -114,7 +101,7 @@ ohmlatl podman commit kali-dev kali-custom:2026-11-02
 ohmlatl build --from kali-custom:2026-11-02 -t kali-custom:2026-11-02
 ```
 
-El build exporta el rootfs dentro de `podman unshare`, genera la clave SSH, calcula el tamaño y pide la passphrase del rootfs:
+`--from` solo usa imágenes locales; las imágenes remotas necesitan nombre completo, como `docker.io/...`. `-t` define el nombre y la tag del resultado, y el build los graba en el `manifest.yaml` de la imagen. El build exporta el rootfs dentro de `podman unshare`, genera las claves SSH, calcula el tamaño y pide la passphrase del rootfs:
 
 ```text
 [build] exporting rootfs (podman unshare)
@@ -125,15 +112,15 @@ Repeat:
 [build] luks2 + integrity (hmac-sha256)
 [build] mkfs.ext4 + e2fsck
 [build] disk image kali-custom:2026-11-02
-  rootfs: images/kali-custom/2026-11-02/rootfs.luks
+  rootfs: ~/.local/share/ohmlatl/images/kali-custom/2026-11-02/rootfs.luks
   size:   3.2 GiB
 ```
 
-`--size 8G` define el tamaño. El build puede pedir `sudo` para abrir el device-mapper de LUKS; `cryptsetup` lee la passphrase del TTY.
+`--size 8G` define el tamaño. El build pide `sudo` una vez para abrir el device-mapper de LUKS. Los archivos temporales quedan en `~/.cache/ohmlatl/build` y se borran al final.
 
-### 3.4 Fíjalo en un Containerfile
+### 2.4 Fijarlo en un Containerfile
 
-El commit es un snapshot del filesystem. Cuando las herramientas se estabilicen, pasa los comandos a un `Containerfile` para tener un rebuild reproducible:
+El commit es un snapshot del sistema de archivos. Cuando las herramientas se estabilicen, pasa los comandos a un `Containerfile` para tener un rebuild repetible:
 
 ```text
 kali-custom/
@@ -159,9 +146,8 @@ user:
 vm:
   vcpus: 2
   memory: 4GiB
-  disks:
-    - volume: work
-      mount: /home/dev/work
+  network:
+    internet: true
 ```
 
 `Containerfile`:
@@ -179,69 +165,27 @@ Build:
 ohmlatl build
 ```
 
-El build falla con un mensaje claro si la imagen no tiene systemd, sshd o el `user.name` con el UID/GID declarado.
+El build falla con un mensaje claro si la imagen no tiene systemd, sshd o el `user.name` con el UID/GID declarados.
 
-## 4. Crea volúmenes
-
-Volumen cifrado:
-
-```bash
-ohmlatl volume create work --size 8G --luks
-```
-
-Resultado esperado:
-
-```text
-Volume passphrase:
-Repeat:
-[ohmlatl] volume work
-  file: volumes/work.luks
-  fs:   ext4
-  size: 8 GiB
-```
-
-`--luks` puede pedir `sudo` para el device-mapper. La passphrase se lee del TTY, nunca de un flag o del entorno. Si usas la passphrase del rootfs, el arranque pregunta una sola vez.
-
-Volumen sin LUKS:
-
-```bash
-ohmlatl volume create data --size 8G
-```
-
-```text
-[ohmlatl] volume data
-  file: volumes/data.ext4
-  fs:   ext4
-  size: 8 GiB
-```
-
-El volumen no necesita conocer el UID: en el primer montaje, la VM entrega la raíz del volumen a `user.uid:gid`.
-
-## 5. Primer arranque
+## 3. Primer arranque
 
 ```bash
 ohmlatl run kali-custom:2026-11-02
 ```
 
-El comando crea la VM `kali-custom`, la red y el supervisor, y adjunta el serial. Los volúmenes y puntos de montaje vienen del manifest.
+El comando pide `sudo` una vez, inicia el supervisor de la VM `kali-custom`, crea la red y adjunta el serial.
 
 Resultado esperado:
 
 ```text
 [ohmlatl] vm kali-custom
 [ohmlatl] rootfs: images/kali-custom/2026-11-02/rootfs.luks (LUKS2 + integrity)
-[ohmlatl] disk: work (LUKS2) -> /home/dev/work
-[ohmlatl] network: ohmlatl-0 172.31.0.1/30, guest 172.31.0.2
+[ohmlatl] network: ohmlatl-0 172.31.0.1/30, guest 172.31.0.2, internet on
+[ohmlatl] forwards: none
 [ohmlatl] starting firecracker (jailer)
 [ohmlatl] serial attached; Ctrl-] to detach
 ...
 LUKS passphrase for rootfs:
-```
-
-El initramfs prueba la misma passphrase en cada volumen LUKS. Si falla:
-
-```text
-LUKS passphrase for work:
 ```
 
 Después del arranque:
@@ -250,9 +194,9 @@ Después del arranque:
 kali-custom login:
 ```
 
-`Ctrl-]` desacopla la terminal; la VM sigue corriendo bajo el supervisor. `--vcpus` y `--memory` sobrescriben el manifest. Ninguna passphrase en argv, entorno, manifest o log.
+`Ctrl-]` desconecta la terminal; la VM sigue corriendo bajo el supervisor, incluso después de cerrar sesión. `--vcpus` y `--memory` sobrescriben el manifest. Ninguna passphrase en argv, entorno, manifest o log.
 
-## 6. Accede a la VM
+## 4. Acceder a la VM
 
 ```bash
 ohmlatl shell kali-custom
@@ -262,7 +206,7 @@ ohmlatl shell kali-custom
 dev@kali-custom:~$
 ```
 
-El shell usa SSH por la red de la VM con la clave generada en el build. No hay directorio del host dentro de la VM; el acceso siempre es por aquí.
+El shell usa SSH por la red de la VM con la clave y la host key creadas en el build. Ignora tu `~/.ssh/config` y nunca reenvía tu agente SSH. No hay directorio del host dentro de la VM; el acceso siempre es por aquí.
 
 ```bash
 ohmlatl exec kali-custom -- uname -a
@@ -273,8 +217,8 @@ Linux kali-custom 6.x ...
 ```
 
 ```bash
-ohmlatl cp kali-custom:/home/dev/work/report.txt ./report.txt
-ohmlatl cp ./input.txt kali-custom:/home/dev/work/input.txt
+ohmlatl cp kali-custom:/home/dev/report.txt ./report.txt
+ohmlatl cp ./input.txt kali-custom:/home/dev/input.txt
 ```
 
 Consola serial (rescate o volver a adjuntar):
@@ -295,9 +239,48 @@ Logs:
 ohmlatl logs kali-custom -f
 ```
 
-`logs` muestra la salida del serial.
+`logs` muestra la salida del serial. El log vive en `/run/ohmlatl` y desaparece cuando el host reinicia.
 
-## 7. Estado y ciclo de vida
+## 5. Red
+
+Por defecto la VM alcanza internet y nada más: ni el host, ni la LAN, ni otras VMs. El host alcanza la VM por su IP (`172.31.0.2`).
+
+Para cortar internet y abrir solo servicios específicos, usa `vm.network` en el `manifest.yaml` de la imagen (o en `ohmlatl.yaml` antes del build). Ejemplo: un agente que solo puede usar el Ollama del host y un servidor MCP en otra VM.
+
+```yaml
+vm:
+  network:
+    internet: false
+    forward:
+      - port: 11434
+        to: host:11434
+      - port: 8080
+        to: vm/mcp:8080
+```
+
+```bash
+ohmlatl run agent:2026-11-02
+```
+
+```text
+[ohmlatl] network: ohmlatl-1 172.31.0.5/30, guest 172.31.0.6, internet off
+[ohmlatl] forwards:
+  172.31.0.5:11434 -> host 127.0.0.1:11434
+  172.31.0.5:8080  -> vm mcp:8080
+```
+
+Dentro de la VM el gateway es la única dirección que responde:
+
+```bash
+curl http://172.31.0.5:11434/api/tags
+```
+
+- `to: host:<puerto>` llega a `127.0.0.1:<puerto>` del host, así que Ollama puede seguir escuchando solo en loopback.
+- `to: vm/<nombre>:<puerto>` llega a otra VM de `ohmlatl`. Si está detenida, la conexión se cierra.
+- Solo TCP. `run` siempre imprime los forwards abiertos.
+- Cambiar `vm.network` en el `manifest.yaml` de la imagen vale en el próximo `start`; sin rebuild.
+
+## 6. Estado y ciclo de vida
 
 ```bash
 ohmlatl ps
@@ -317,42 +300,30 @@ ohmlatl stop kali-custom
 [ohmlatl] stopped
 ```
 
-`stop` envía Ctrl-Alt-Del al guest; systemd apaga de forma limpia y Firecracker termina. Si no termina en 30 s, `ohmlatl` mata el proceso.
+`stop` envía Ctrl-Alt-Del al guest; systemd se apaga limpiamente y Firecracker termina. Si no termina en 30 s, `ohmlatl` lo mata. Dentro de la VM, `poweroff` y `reboot` también terminan la VM.
 
 ```bash
 ohmlatl start kali-custom
 ```
 
-`start` usa la última imagen y vuelve a pedir las passphrases en el serial.
+`start` usa la última imagen y vuelve a pedir la passphrase en el serial.
 
 ```bash
 ohmlatl rm kali-custom
 ```
 
-Elimina el estado de la VM. Imágenes y volúmenes se quedan; usa `ohmlatl volume rm` para volúmenes.
+Elimina el estado de la VM. La imagen permanece; usa `ohmlatl image rm` para ella.
 
-## 8. Lee un volumen en el host
+## 7. Actualizar: desde dentro o rebuild
 
-Con la VM detenida:
-
-```bash
-ohmlatl volume mount work /mnt/work
-```
-
-```text
-Volume passphrase:
-[ohmlatl] mounted volumes/work.luks at /mnt/work (read-only)
-```
+El rootfs es tu computadora y guarda todo lo que haces en él. Actualízalo desde dentro:
 
 ```bash
-ohmlatl volume umount work
+ohmlatl exec kali-custom -- sudo apt-get update
+ohmlatl exec kali-custom -- sudo apt-get -y full-upgrade
 ```
 
-El montaje en el host siempre es de solo lectura y se rechaza con la VM corriendo. Mientras está montado, `run` y `start` rechazan ese volumen.
-
-Si la VM debe llegar a un servicio local del host, este tiene que escuchar en el gateway de la VM, por ejemplo `172.31.0.1:8080`. `ohmlatl` no publica puertos.
-
-## 9. Actualiza el rootfs
+Un rebuild crea una **computadora nueva y vacía** a partir del `Containerfile`:
 
 ```bash
 ohmlatl build -t kali-custom:2026-12-01
@@ -360,20 +331,37 @@ ohmlatl stop kali-custom
 ohmlatl run kali-custom:2026-12-01
 ```
 
-`run` sobre una VM detenida la cambia a la nueva imagen. Los volúmenes no se tocan; `/home/dev` vuelve al skeleton de la imagen, así que guarda lo importante en volúmenes. La nueva imagen trae host keys SSH nuevas, y `ohmlatl` reinicia el `known_hosts` de la VM. Si la VM está corriendo, `run` falla.
+`run` sobre una VM detenida cambia la imagen. Nada del rootfs anterior pasa al nuevo: copia antes lo que importa con `ohmlatl cp`. La imagen anterior queda hasta `ohmlatl image rm kali-custom:2026-11-02`. Si la VM está corriendo, `run` falla.
 
-## 10. Varias VMs
+## 8. Llevarla a otro host
+
+La computadora es el directorio de la imagen:
 
 ```bash
-ohmlatl run kali-lab:2026-11-02
+rsync -a ~/.local/share/ohmlatl/images/kali-custom/ otherhost:.local/share/ohmlatl/images/kali-custom/
+```
+
+En el otro host, con `ohmlatl` instalado:
+
+```bash
+ohmlatl run kali-custom:2026-11-02
+```
+
+El `rootfs.luks` ocupa su tamaño completo en disco (el integrity escribe todos los sectores). Detén la VM antes de copiar. La caché de Podman queda en el host original: para hacer rebuild en el host nuevo, toda la cadena de build (`kali-base`, luego `kali-custom`) vuelve a correr allí.
+
+## 9. Varias VMs
+
+```bash
+ohmlatl run mcp:2026-11-02
+ohmlatl run agent:2026-11-02
 ohmlatl ps
 ```
 
-Cada imagen es una VM propia con su `/30`, asignado automáticamente (`--subnet` lo sobrescribe). Un volumen solo puede estar adjunto a una VM a la vez; el segundo intento falla con lock.
+Cada imagen es su propia VM con su propio `/30`, asignado automáticamente. Las VMs no se ven entre sí; solo un forward `vm/<nombre>` las conecta.
 
-## 11. Fallas y recuperación
+## 10. Fallos y recuperación
 
-**Passphrase del rootfs incorrecta.** `cryptsetup` reintenta; tras tres fallas cae al rescue shell del initramfs:
+**Passphrase del rootfs incorrecta.** `cryptsetup` reintenta; después de tres fallos cae al rescue shell del initramfs:
 
 ```text
 (initramfs) #
@@ -381,30 +369,29 @@ Cada imagen es una VM propia con su `/30`, asignado automáticamente (`--subnet`
 
 Usa `ohmlatl console kali-custom` para adjuntarte.
 
-**Passphrase de volumen incorrecta.** Tres intentos, luego rescue shell.
+**Rootfs manipulado.** La verificación de integridad convierte el sector alterado en error de lectura; `e2fsck` o el montaje falla y el arranque cae al rescue. Restaura una copia o vuelve a generar la imagen.
 
-**Rootfs manipulado.** La verificación de integridad convierte el sector alterado en error de lectura; `e2fsck` o el montaje falla y el arranque cae al rescue. Reconstruye la imagen.
+**Firecracker murió.** `ohmlatl ps` muestra `stopped`; `ohmlatl start kali-custom` vuelve a arrancarla. El initramfs ejecuta `e2fsck -p` antes de montar.
 
-**Firecracker murió.** `ohmlatl ps` muestra `stopped`; `ohmlatl start kali-custom` la arranca de nuevo. El initramfs corre `e2fsck -p` antes de montar.
+**El host reinició.** Las VMs no arrancan solas; `ohmlatl ps` y `ohmlatl start`.
 
-**El host se reinició.** Las VMs no arrancan solas; `ohmlatl ps` y `ohmlatl start`.
+**Sin red dentro de la VM en un host con Docker o ufw.** `ohmlatl doctor --run` muestra la regla que deja pasar `ohmlatl-*`.
 
-**Disco retirado con la VM corriendo.** No lo hagas. Si el disco desaparece, el siguiente arranque corre `e2fsck`.
+**Passphrase perdida.** El rootfs no se puede abrir. No hay clave LUKS en disco; vuelve a generar la imagen y empieza de cero.
 
-**Passphrase perdida.** El rootfs se puede reconstruir. Un volumen LUKS se pierde. No hay clave LUKS en el disco.
+## 11. No objetivos
 
-## 12. Fuera de alcance
-
-- Sin publicación de puertos, ingress ni proxy público. El host llega al guest; el acceso externo es tu responsabilidad.
-- Sin bind mount de directorios del host. La VM solo ve discos gestionados por `ohmlatl`.
-- Sin GPU. La VM corre solo en CPU.
+- Sin publicación de puertos, ingress ni proxy público. Los forwards solo salen de la VM; el host alcanza la IP del guest; el acceso externo es tu responsabilidad.
+- Sin bind mount de directorios del host. Los archivos entran y salen con `ohmlatl cp`.
+- Sin discos extra ni volúmenes. La computadora es el rootfs.
+- Sin GPU ni pantalla. La VM se usa desde la terminal.
 - Sin macOS/Windows. Firecracker requiere Linux con KVM.
-- Sin gestión de herramientas, procesos, plugins o flujos de tareas. Eso es contenido de la imagen.
+- Sin gestión de herramientas, procesos, plugins ni flujos de tareas. Eso es contenido de la imagen.
 
-## 13. Contrato de UX
+## 12. Contrato de UX
 
-- Las passphrases se escriben en el TTY de la VM al arrancar y en el TTY del host al crear (`build`/`volume create`/`volume mount`). Nunca en flag, env, manifest, archivo o log.
+- Las passphrases se escriben en la TTY del host en `build` y en la TTY de la VM al arrancar. Nunca en flag, env, manifest, archivo o log.
 - Los comandos destructivos piden confirmación.
 - Los errores dicen qué falló y qué hacer; los códigos de salida son estables.
 - Sin daemon global. El supervisor es por VM y termina con ella.
-- Todo el estado persistente vive en el disco.
+- Toda apertura de red se declara en el manifest y `run` la imprime.

@@ -13,6 +13,5 @@ user:
 vm:
   vcpus: 2
   memory: 4GiB
-  disks:
-    - volume: work
-      mount: /home/dev/work
+  network:
+    internet: true

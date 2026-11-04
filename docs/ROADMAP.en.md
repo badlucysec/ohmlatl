@@ -8,26 +8,27 @@ Status: pre-implementation. The repository is still the Rust scaffold; this docu
 
 `ohmlatl` manages bootable disk images and Firecracker microVM runs. With Podman at build time, it turns a `Containerfile` or an OCI image into a `rootfs.luks` (LUKS2 + integrity + ext4), and at runtime it boots that rootfs with Firecracker, using the kernel and initramfs embedded in the binary.
 
-The host is thin: binary, `/dev/kvm`, network, and the drive. The real computer (rootfs, volumes, tools, and data) lives on the external drive. The runtime does not use Podman, has no daemon, keeps no persistent state on the host, and does not bind mount host directories.
+The computer is the `rootfs.luks`: one file that holds the system, the tools, and the data, and that can be copied to another host and booted there. The same isolation serves to run untrusted tools, projects, and agents, with the network closed by default and openings declared in the manifest. The runtime does not use Podman, has no global daemon, and does not bind mount host directories.
 
 The documentation example is a Kali Rolling image. `ohmlatl` does not manage image contents: tools, IDEs, data, and services are the operator's responsibility.
 
 ## Scope
 
 - Build a rootfs from a `Containerfile` or an OCI image, with rootless Podman.
-- `rootfs.luks` in LUKS2 with `hmac-sha256` integrity, unlocked in the initramfs with a passphrase typed on the VM console. `/home/<user>` lives in the rootfs.
-- Generic volumes, ext4 with or without LUKS2, mounted where the manifest says.
+- `rootfs.luks` in LUKS2 with `hmac-sha256` integrity, unlocked in the initramfs with a passphrase typed on the VM console. `/home/<user>` lives in the rootfs. No extra disks.
 - Kernel and initramfs built in the repository and embedded in `ohmlatl`.
-- Firecracker with jailer, TAP/NAT.
+- Firecracker with jailer, TAP per VM.
+- Network closed to host, LAN, and other VMs by default; optional internet; TCP forwards to host services and other VMs.
 - Per-VM supervisor with a PTY serial, `console`, and `logs`.
 - `shell`, `exec`, and `cp` over SSH.
-- Small CLI, no global daemon, all persistent state on the drive.
+- Small CLI, no global daemon.
 
 ## Non-goals
 
-- Publishing ports, ingress, reverse proxy, or public tunnel. The host reaches the guest IP; external access is the operator's problem.
+- Publishing ports, ingress, reverse proxy, or public tunnel. Forwards only go out of the VM; the host reaches the guest IP; external access is the operator's problem.
 - Bind mount of host directories.
-- GPU, PCI/USB passthrough.
+- Extra disks or volumes.
+- GPU, display, PCI/USB passthrough.
 - Native macOS/Windows. Firecracker requires Linux with KVM.
 - Guests without systemd.
 - Managing tools, processes, plugins, or task flows.
@@ -41,35 +42,31 @@ The documentation example is a Kali Rolling image. `ohmlatl` does not manage ima
 | Binaries | Firecracker, jailer, Podman, kernel, and initramfs embedded in `ohmlatl` |
 | Host | Linux x86_64 with `/dev/kvm` |
 | Build | Embedded rootless Podman, `podman unshare` required |
-| Runtime | per-user supervisor; `sudo` for TAP, nft, and jailer |
+| Runtime | supervisor as a root system unit via one `sudo systemd-run`; jailer drops to the operator's UID |
 | Init | systemd |
-| Rootfs | LUKS2 + integrity + ext4, `--size` or calculated |
-| Home | inside the rootfs; rebuilt with the image |
-| Volumes | ext4, optional LUKS2, mountpoint in the manifest |
-| Passphrase | on the VM `ttyS0`; the rootfs passphrase is tried on volumes first |
-| Keys | no LUKS key on the drive |
-| Access | `shell`/`exec`/`cp` over SSH |
-| Network | TAP + `/30` + NAT; no publish/ingress |
-| Supervisor | one per VM; no global daemon |
-| Update | rebuild with a new tag; volumes untouched |
+| Rootfs | LUKS2 + integrity (with journal) + ext4, `--size` or calculated |
+| Data | inside the rootfs; updated from the inside; rebuild creates a new computer |
+| Passphrase | host TTY at build, VM `ttyS0` at boot; fixed PBKDF |
+| Keys | no LUKS key on disk |
+| Access | `shell`/`exec`/`cp` over SSH, host key from the build |
+| Network | TAP + `/30`; closed by default; optional NAT to the internet; TCP forwards |
+| Supervisor | one per VM; survives logout; no global daemon |
+| Portability | copy the image directory to another host |
 
 ## Architecture
 
 ```text
 HOST
 ├── ohmlatl (trusted CLI; embeds Firecracker, jailer, Podman, vmlinux, initramfs)
-├── $XDG_RUNTIME_DIR/ohmlatl/{bin,jail} (tmpfs)
-├── VM supervisor (one per VM)
+├── ~/.local/share/ohmlatl/
+│   ├── images/<name>/<tag>/{rootfs.luks,manifest.yaml,ssh/}
+│   └── vms/<name>/state.json
+├── /run/ohmlatl/ (tmpfs: bin, jail, console.sock, serial.log)
+├── supervisor per VM (system unit ohmlatl-<name>)
 │   ├── Firecracker (via jailer)
 │   ├── serial PTY
-│   └── console output log
+│   └── TCP forwards
 └── TAP + nftables
-
-DRIVE
-├── bin/ohmlatl
-├── images/<name>/<tag>/{rootfs.luks,manifest.yaml,ssh/}
-├── volumes/<volume>.{luks,ext4}
-└── vms/<name>/{state.json,known_hosts,serial.log,console.sock,lock}
 
 GUEST
 ├── initramfs: passphrase prompt, fsck, mount, switch_root
@@ -82,36 +79,36 @@ GUEST
 
 ```text
 ohmlatl run <name>:<tag>
-  → validate manifest, take VM and volume locks
-  → extract embedded binaries to tmpfs
-  → allocate /30, create TAP + nft rules (sudo)
-  → start supervisor + PTY
-  → start Firecracker via jailer (sudo)
+  → validate manifest, allocate /30
+  → sudo systemd-run: supervisor as a system unit
+      → extract embedded binaries to /run/ohmlatl
+      → TAP + nft chains + forwards
+      → PTY + jailer → Firecracker
   → kernel + initramfs
       → rootfs passphrase on ttyS0
-      → try it on each LUKS volume, ask again if it fails
       → e2fsck -p
-      → mount rootfs at /newroot, volumes at /newroot/<mount>
+      → mount rootfs, write resolv.conf
       → switch_root
   → systemd → sshd
-  → supervisor keeps serial and process
+  → supervisor keeps serial, process, and forwards
 ```
 
-The host passes everything the initramfs needs on the kernel cmdline: `ip=` for the network, `ohmlatl.user=<uid>:<gid>`, and `ohmlatl.disks=<dev>:<luks|ext4>:<mount>,...`. The passphrase never enters the manifest, cmdline, environment, or logs.
+The kernel cmdline only carries `console`, `reboot=k`, `panic`, `root`, and `ip=` (address, gateway, DNS). The passphrase never enters the manifest, cmdline, environment, or logs.
 
 ## Disk image pipeline
 
 ```text
-Containerfile or OCI ref
-  → podman build / pull + podman create
-  → generate SSH client key
+Containerfile or local OCI ref
+  → podman build / podman create
+  → generate SSH client key and guest host key
+  → podman export + tar inside podman unshare, in ~/.cache/ohmlatl/build
+  → machine-id, hostname, host key, authorized_keys, NetworkManager off on eth0,
+    poweroff/halt → reboot
+  → validate systemd, sshd, user
   → size: --size or ceil(du -sb * 1.25) + 512 MiB
-  → luksFormat --integrity hmac-sha256 (sudo)
-  → podman export + tar inside podman unshare
-  → clean machine-id, SSH host keys, hostname; install authorized_keys
-  → mkfs.ext4 -d with the mapper's usable size
-  → dd into the mapper, close
-  → images/<name>/<tag>/{rootfs.luks,manifest.yaml,ssh/}
+  → passphrase once → luksFormat --integrity hmac-sha256 --integrity-no-wipe (sudo)
+  → mkfs.ext4 -d with the mapper's usable size → dd into the mapper, close
+  → images/<name>/<tag>/{rootfs.luks,manifest.yaml,ssh/}; delete temporaries
 ```
 
 Rules:
@@ -119,50 +116,42 @@ Rules:
 - The whole export/mkfs pipeline runs inside `podman unshare`. Outside it, the rootfs gets the operator's UID and breaks `sudo`, `sshd`, setuid, and capabilities.
 - `podman export`, not `podman save`.
 - `tar --same-owner --numeric-owner --xattrs --xattrs-include='*' --xattrs-exclude=security.selinux`.
+- No plaintext rootfs outside the build temporary directory, which is deleted at the end and on failure.
+- Fixed PBKDF (`argon2id`, 256 MiB, 2 s), so unlocking does not depend on the build machine.
+- Remote images need a fully qualified name; `--from` only uses local images.
 - No secrets in `ARG`/`ENV`/`RUN`; use `podman build --secret`.
 - CPU baseline; no `-march=native`.
-- The build fails if the image has no systemd, no sshd, or no declared user.
-
-## Volumes
-
-- `volume create <name> --size <n> [--luks]`: `volumes/<name>.luks` or `volumes/<name>.ext4`.
-- LUKS volumes have no integrity, because of the write cost.
-- On first mount, an empty volume root gets `chown` to the manifest user.
-- A volume can only be used by one owner at a time: VM or host mount. Per-file lock.
-- `volume mount` on the host is always read-only and only with the VM stopped.
 
 ## Network
 
-- One TAP per VM, `/30` from `172.31.0.0/16`, host `.1`, guest `.2`, allocated by `run`.
-- NAT via nftables in its own table (`inet ohmlatl`), cleaned up on `stop`.
-- Guest IP and DNS through `ip=` on the kernel cmdline; DNS comes from the host resolver.
-- No `--publish`, ingress, or proxy. The host reaches `172.31.0.2:<port>`.
-- IPv6 disabled. No egress filter, documented as a limitation.
+- One TAP per VM, `/30` from `172.31.0.0/16`, host `.1`, guest `.2`, allocated by `run`, skipping networks already in the routing table.
+- nftables in a shared table (`inet ohmlatl`) with per-VM chains. The table and `ip_forward` are restored when the last VM stops.
+- Default: the guest reaches the internet through NAT, and nothing on the host, the LAN, or other VMs.
+- `internet: false` cuts the internet.
+- `forward`: the supervisor listens on `<gateway>:<port>` and connects to `127.0.0.1:<port>` on the host or to another VM. TCP only.
+- The host reaches `172.31.0.2:<port>`. No `--publish`, ingress, or proxy.
+- IPv6 disabled.
 
 ## Lifecycle and supervisor
 
-- `run` creates the VM, starts the supervisor, and attaches the serial. On a stopped VM it switches the image.
-- The supervisor keeps the PTY, Firecracker, and output log; it survives CLI detach.
+- `run` asks for `sudo` once and starts the supervisor as the system unit `ohmlatl-<name>`. On a stopped VM it switches the image.
+- The supervisor keeps the PTY, Firecracker, network, and forwards; it survives CLI detach and logout.
 - `Ctrl-]` detaches; `console` reattaches; `shell` uses SSH.
-- `stop` sends Ctrl-Alt-Del through the Firecracker API; with `reboot=k`, the guest's clean reboot ends Firecracker. Kill after 30 s. The supervisor cleans TAP/nft and releases locks.
-- The SSH key is generated at build, next to the image. The VM `known_hosts` resets when the image changes.
-- `start` reuses the last image and asks for passphrases again.
-- `rm` removes the VM state; images and volumes remain.
+- `stop` sends Ctrl-Alt-Del through the Firecracker API; with `reboot=k`, the guest's clean reboot ends Firecracker. Kill after 30 s. Inside the guest, `poweroff` and `reboot` also end the VM.
+- The SSH client key and guest host key are generated at build, next to the image; SSH checks the host key strictly and ignores `~/.ssh/config`.
+- `start` reuses the last image and asks for the passphrase again.
+- `rm` removes the VM state; the image remains.
 
 ## CLI
 
 ```text
-ohmlatl init <dir>
 ohmlatl doctor [--build|--run]
 
 ohmlatl build [-f Containerfile | --from <ref>] [-t <name:tag>] [--size <n>]
 ohmlatl podman <args>
 ohmlatl image ls|inspect|rm
 
-ohmlatl volume create <name> --size <n> [--luks]
-ohmlatl volume ls|inspect|mount|umount|rm
-
-ohmlatl run <name:tag> [--vcpus n] [--memory n] [--subnet cidr]
+ohmlatl run <name:tag> [--vcpus n] [--memory n]
 ohmlatl start|stop|rm <vm>
 ohmlatl ps
 ohmlatl shell <vm> [-- cmd]
@@ -173,7 +162,7 @@ ohmlatl logs <vm> [-f]
 ohmlatl console <vm>
 ```
 
-No `expose`, `ingress`, `publish`, or `host-forward`.
+No `expose`, `ingress`, or `publish`.
 
 ## Manifest
 
@@ -193,52 +182,57 @@ user:
 vm:
   vcpus: 2
   memory: 4GiB
-  disks:
-    - volume: work
-      mount: /home/dev/work
+  network:
+    internet: true
+    forward:
+      - port: 11434
+        to: host:11434
+      - port: 8080
+        to: vm/mcp:8080
 ```
 
-`ohmlatl build` copies the manifest to `images/<name>/<tag>/manifest.yaml`. The manifest is plaintext and is validated before it becomes the kernel cmdline. `name` + `build.tag` form the image reference; without a tag, `latest`; `-t` overrides. `build.containerfile` is optional with `--from`.
+`ohmlatl build` copies the manifest to `images/<name>/<tag>/manifest.yaml`, with the final name and tag. `run` reads that copy; editing `vm` there takes effect on the next `start`. `name` + `build.tag` form the image reference; without a tag, `latest`; `-t` overrides. `build.containerfile` is optional with `--from`. Minimum memory: 512 MiB. Unknown fields are an error.
 
-## Drive layout
+## Host layout
 
 ```text
-/mnt/vmdisk/
-├── bin/ohmlatl
-├── images/<name>/<tag>/{rootfs.luks,manifest.yaml,ssh/}
-├── volumes/<volume>.{luks,ext4}
-└── vms/<name>/{state.json,known_hosts,serial.log,console.sock,lock}
+~/.local/share/ohmlatl/
+├── images/<name>/<tag>/{rootfs.luks,manifest.yaml,ssh/{id_ed25519,known_hosts}}
+└── vms/<name>/state.json
+
+/run/ohmlatl/{bin,jail,<name>/{console.sock,api.sock,serial.log}}
+~/.cache/ohmlatl/{bin,podman,build}
 ```
 
-The drive must be mounted without `noexec`. The Podman build cache stays on the host under `$XDG_CACHE_HOME/ohmlatl/podman`; it is a cache, not state.
+Files 0600, directories 0700. The Podman cache is a cache, not state: rebuilding on another host runs the build chain again there.
 
 ## Security
 
 | Threat | Protection |
 |---|---|
-| Drive theft | Rootfs and `--luks` volumes in LUKS2; no LUKS key on the drive |
-| Tampered rootfs | Per-sector `hmac-sha256` integrity; an altered sector fails to read |
-| Tampered kernel/initramfs | Not on the drive; embedded in `ohmlatl` |
-| Tampered `ohmlatl` on the drive | Operator verifies the binary against release SHA-256 or signature, outside the drive |
-| Tampered manifest | Strict validation before building the cmdline |
-| Another host user | Files 0600; directories 0700 |
+| Stolen `rootfs.luks` | LUKS2; no LUKS key on disk |
+| Tampered `rootfs.luks` | Per-sector `hmac-sha256` integrity; an altered sector fails to read |
+| Tampered kernel/initramfs | Not on disk; embedded in `ohmlatl` |
+| Another host user | Files 0600; directories 0700; console socket owned by the operator |
 | Workload escaping to the host | KVM + own kernel + seccomp + jailer |
-| Passphrase in logs | Supervisor records only console output; echo disabled |
+| Workload reaching host, LAN, or other VMs | Blocked by nft by default; only declared forwards pass |
+| Workload grabbing the operator's SSH agent | `-F /dev/null`, `ForwardAgent=no`, `ForwardX11=no` |
+| Passphrase in logs or on disk | Read from the TTY, passed through stdin; echo disabled at boot |
 
-Limitations: volumes without `--luks` are plaintext; LUKS volumes have no integrity; no protection against rolling back a whole old `rootfs.luks`; the SSH private key is plaintext on the drive (0600); no protection against a compromised host.
+Limitations: no protection against rolling back to an old copy of `rootfs.luks`; integrity costs write speed and the file takes its full size; the SSH private key is plaintext on the host (0600); a rebuild creates a new, empty computer; with `internet: true` the guest reaches the internet without a filter; no protection against a compromised host.
 
 ## Portability
 
 - Linux x86_64 with KVM in the MVP.
-- Drive in ext4/btrfs/xfs; no FAT/exFAT/NTFS.
 - Kernel and binaries with a CPU baseline; no `-march=native`.
+- The image directory is copied as is to another host.
 - Always cold boot; no snapshots.
 
 ## Phases
 
 ### P0: Host sanity and boot
 
-- `ohmlatl init` and `ohmlatl doctor`.
+- `ohmlatl doctor`.
 - Repository scripts that build the kernel and the initramfs.
 - Embedding and extraction of binaries.
 - Boot a plain test rootfs with Firecracker, without jailer.
@@ -250,68 +244,66 @@ Limitations: volumes without `--luks` are plaintext; LUKS volumes have no integr
 - `build -f`, `build --from`, `-t`, `--size`.
 - `ohmlatl podman <args>` with the embedded Podman.
 - `podman unshare` with export/tar/xattrs.
-- `rootfs.luks` with integrity; SSH key; manifest copy.
-- Clean `machine-id`, SSH host keys, and hostname.
+- `rootfs.luks` with integrity; SSH keys; manifest copy.
 - `image ls/inspect/rm`.
 - `examples/kali` as the first example.
 
-**Done when:** `sudo -n true`, `getcap /bin/ping`, and SSH work in the guest; the rootfs unlocks with a passphrase on the console; `e2fsck` is clean; the customized Kali image from `podman commit` boots; an image without systemd or sshd fails with a clear message; a one-byte change in `rootfs.luks` produces a read error.
+**Done when:** `sudo -n true`, `getcap /bin/ping`, and SSH work in the guest; the rootfs unlocks with a passphrase on the console; `e2fsck` is clean; the customized Kali image from `podman commit` boots; an image without systemd or sshd fails with a clear message; a one-byte change in `rootfs.luks` produces a read error; nothing is left in `~/.cache/ohmlatl/build`.
 
 ### P2: Runtime
 
 - `run`, `start`, `stop`, `rm`, `ps`, `console`, `logs`, `shell`, `exec`, `cp`.
-- Per-VM supervisor, PTY, output log, detach/attach.
-- Jailer, TAP/NAT `/30`.
-- `volume create/ls/rm`; volumes in the initramfs with the "same passphrase, else ask" rule.
+- Supervisor as a system unit, PTY, serial log, detach/attach.
+- Jailer, TAP `/30`, closed network by default, `internet: true|false`.
 
-**Done when:** the passphrase prompt appears on the VM serial; volumes mount where the manifest says, owned by the user; `shell` enters over SSH; jailer is active; `stop` shuts down cleanly; `kill -9` on Firecracker followed by `start` passes `e2fsck`.
+**Done when:** the passphrase prompt appears on the VM serial; `shell` enters over SSH with a strict host key; jailer is active; the VM survives logout; the guest cannot reach the host, the LAN, or another VM; `stop` and `poweroff` inside the guest shut down cleanly; `kill -9` on Firecracker followed by `start` passes `e2fsck`.
 
-### P3: Volumes on the host and multiple VMs
+### P3: Forwards and multiple VMs
 
-- `volume inspect/mount/umount`, read-only, with the VM stopped.
-- Locks between VM and host mount.
-- Automatic subnets; two VMs at the same time.
+- `forward` to `host:<port>` and `vm/<name>:<port>`.
+- Automatic subnets; several VMs at the same time; shared nft table.
+- `doctor --run` with Docker and ufw.
 
-**Done when:** a volume survives a rootfs rebuild; it mounts read-only on the host; a mount with the VM running is refused; two VMs run at the same time without collision.
+**Done when:** an agent VM with `internet: false` reaches the host's Ollama and an MCP server in another VM, and nothing else; two VMs run at the same time without collision; stopping one VM does not break the network of the other.
 
 ### Future
 
-Not planned in detail: atomic update with rollback, backup/restore, `image import/export`, `volume resize`, `gc`, `--json`, completions, aarch64, integrity on volumes, rollback protection.
+Not planned in detail: backup/restore, `image import/export`, UDP forwards, `gc`, `--json`, completions, aarch64, rollback protection.
 
 ## Tests
 
 **Unit**
 
-- Manifest parser and validation (names, mounts, UID/GID).
+- Manifest parser and validation (names, UID/GID, ports, forwards).
 - Cmdline generation.
 - Size calculation.
-- Subnet allocation.
-- VM state and volume locks.
+- Subnet allocation against existing routes.
+- nft rules per VM.
 
 **Integration**
 
 - Podman build → ext4 with ownership, xattrs, and capabilities.
-- `--from` with a customized Kali image.
+- `--from` with a customized Kali image; refusal of short remote names.
 - Clear failure for an image without systemd or sshd.
 - `rootfs.luks` with integrity; a one-byte change fails the read.
-- Initramfs with `cryptsetup` on `ttyS0`; same passphrase on volumes; retry.
-- Wrong rootfs passphrase drops to rescue.
-- Jailer + TAP + serial PTY.
-- Ctrl-Alt-Del ends Firecracker.
+- Initramfs with `cryptsetup` on `ttyS0`; retry; wrong passphrase drops to rescue.
+- Jailer + TAP + serial PTY under `systemd-run`.
+- Ctrl-Alt-Del and `poweroff` end Firecracker.
 - `kill -9` + `e2fsck`.
-- `shell`/`exec`/`cp` over SSH.
+- `shell`/`exec`/`cp` over SSH with `ForwardAgent=yes` in `~/.ssh/config` (must not forward).
+- Network: guest blocked from host, LAN, and other VMs; forwards work; `internet: false` cuts egress.
 
 **E2E**
 
 - First example: Kali base, `podman run`, install x/y/z, `podman commit`, `build --from`, `run`, passphrase, `shell`.
-- `init → build → volume create → run → shell → stop → start`.
-- Rootfs rebuild with volumes preserved.
-- Read-only volume mount on the host.
+- `doctor → build → run → shell → stop → start`.
+- Copy the image directory to another host and boot it there.
+- Agent VM + MCP VM + Ollama on the host.
 
 **Matrix**
 
 - Intel and AMD; 8/16/32 GiB RAM.
-- ext4 and btrfs; USB and NVMe drives.
+- Hosts with and without Docker/ufw.
 - Weakest CPU in the fleet (CPU baseline).
 
 ## Risks
@@ -319,28 +311,24 @@ Not planned in detail: atomic update with rollback, backup/restore, `image impor
 | Risk | Mitigation |
 |---|---|
 | KVM unavailable/nested | `doctor` fails early with instructions |
-| Jailer + TAP + PTY through `sudo` | First P2 task; `--no-jailer` only for debugging |
-| Ctrl-Alt-Del does not end Firecracker | Validate in P0; kill after timeout |
 | `cryptsetup` prompt in initramfs | `cttyhack`/dup2 of `ttyS0`; echo and retry tests |
 | Wrong ownership in build | Entire pipeline in `podman unshare`; acceptance tests |
 | Old `mkfs.ext4 -d` | `doctor` requires e2fsprogs >= 1.43 |
 | Host without integrity support | `doctor --build` checks cryptsetup and dm-integrity |
-| Integrity write cost on the rootfs | Measure in P1; heavy writes go to volumes |
+| Integrity write cost | Accepted; documented |
 | Guest clock starts wrong (no RTC) | `broken_system_clock` in the initramfs `e2fsck.conf`; chrony in the guest |
 | Rootfs full | Default size with 25% + 512 MiB; `--size` |
-| Abrupt drive removal | Mandatory `stop`; `e2fsck` on boot |
+| Docker/ufw drop forwarding | `doctor --run` detects and prints the rule |
+| NetworkManager in the guest overriding `ip=` | `eth0` unmanaged, written at build |
 | Plain Kali without systemd/sshd | `build` validates and points to `examples/kali` |
 | Opaque container commit | Documented as exploration; Containerfile is the durable source |
-| No egress filter | Documented limitation |
-| Large binary (~100 MB with Podman) | Accepted; extracted once per boot of the host |
+| Large binary (~100 MB with Podman) | Accepted; extracted once per host boot |
 
 ## Items to confirm during implementation
 
 - Guest kernel version and config.
-- Exact `cryptsetup` options for integrity (sector size, journal).
-- Jailer details for TAP and serial.
 - Project license and third-party notices.
 
 ## MVP criterion
 
-The MVP is P0 to P2: a Linux host with KVM, a prepared drive, an image built with Podman, a boot with the passphrase on the VM console, volumes mounted, shell over SSH, jailer active, and a clean shutdown. P3 completes the drive's day-to-day use.
+The MVP is P0 to P2: a Linux host with KVM, an image built with Podman, a boot with the passphrase on the VM console, shell over SSH, jailer active, network closed by default, and a clean shutdown. P3 adds forwards and several VMs working together.

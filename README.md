@@ -1,6 +1,6 @@
 <h1 align="center">ohmlatl</h1>
 
-<p align="center">Portable, reproducible, encrypted Firecracker microVMs.</p>
+<p align="center">Portable, declarative, encrypted Firecracker microVMs.</p>
 
 <p align="center">Pronunciation: <strong>ohm-lal</strong>.</p>
 
