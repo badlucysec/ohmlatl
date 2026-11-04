@@ -16,6 +16,8 @@ You reformat the computer, switch machines, or sit down at a borrowed host. The 
 
 `ohmlatl` exists for that: it turns an external drive into a complete computer, running as a [Firecracker](https://github.com/firecracker-microvm/firecracker) microVM. Firecracker boots in about 125 ms and adds less than 5 MiB of VMM overhead per microVM. Guest RAM is whatever you configure. That is what makes it possible to carry a complete computer on a drive without turning the host into a heavyweight hypervisor and without depending on the host distribution.
 
+The same isolation works for things you do not want to run on the host: a tool of unknown origin, a project cloned from the internet, a PoC, a third-party `npm install` or `make`. Run it inside the VM; the host stays clean.
+
 ## What is ohmlatl?
 
 `ohmlatl` manages bootable disk images and Firecracker microVM runs. It uses the embedded Podman **only at build time** to turn a `Containerfile` or an OCI image into an ext4 rootfs. At runtime there is no Podman, no daemon, and no container: there is a kernel, a rootfs, virtio disks, and a Firecracker process.
@@ -33,6 +35,8 @@ Here, `disk image` is the artifact Firecracker boots. An `OCI image` is the sour
 **Because the host stops mattering.** The drive carries the images and volumes. The target host only needs Linux, `/dev/kvm`, `cryptsetup`, a network, TAP/nftables utilities, an SSH client, and `sudo`. Switching distributions or machines does not change the environment.
 
 **Because isolation is real.** Containers share the host kernel. A microVM has its own kernel, seccomp, and, with the jailer, chroot, namespaces, and cgroups.
+
+**Because you can run what you do not trust.** The tool or project runs inside the VM, under its own kernel, reached through `ohmlatl shell` and `exec`. There is no shared directory for the code to reach the host; only what you copy out with `ohmlatl cp` leaves. To start from scratch, rebuild the image with `ohmlatl build`. The guest has NAT network access and reaches the host gateway, so host services listening on that IP are exposed to it.
 
 **Because tampering is detected.** The kernel and initramfs come from the trusted `ohmlatl` binary, not from the drive. The rootfs has per-sector integrity: a modified sector fails to read instead of running altered code. Verify `ohmlatl` itself against the release SHA-256 or signature.
 

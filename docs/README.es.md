@@ -16,6 +16,8 @@ Formateas la computadora, cambias de máquina o te sientas frente a un host pres
 
 `ohmlatl` existe para eso: convierte un disco externo en una computadora completa que corre como microVM [Firecracker](https://github.com/firecracker-microvm/firecracker). Firecracker arranca en unos 125 ms y agrega menos de 5 MiB de overhead de VMM por microVM. La RAM del guest es la que configures. Eso permite llevar una computadora completa en un disco sin convertir el host en un hypervisor pesado y sin depender de la distribución del host.
 
+El mismo aislamiento sirve para lo que no quieres ejecutar en el host: una herramienta de origen dudoso, un proyecto clonado de internet, un PoC, un `npm install` o `make` de terceros. Ejecútalo dentro de la VM; el host queda limpio.
+
 ## ¿Qué es ohmlatl?
 
 `ohmlatl` gestiona imágenes de disco arrancables y ejecuciones de microVMs Firecracker. Usa el Podman embebido **solo en el build** para convertir un `Containerfile` o una imagen OCI en un rootfs ext4. En runtime no hay Podman, daemon ni contenedor: hay un kernel, un rootfs, discos virtio y un proceso Firecracker.
@@ -33,6 +35,8 @@ Aquí, `imagen de disco` es el artefacto que Firecracker arranca. `Imagen OCI` e
 **Porque el host deja de importar.** El disco lleva las imágenes y los volúmenes. El host de destino solo necesita Linux, `/dev/kvm`, `cryptsetup`, red, utilidades de TAP/nftables, cliente SSH y `sudo`. Cambiar de distribución o de máquina no cambia el entorno.
 
 **Porque el aislamiento es real.** Los contenedores comparten el kernel del host. Una microVM tiene kernel propio, seccomp y, con el jailer, chroot, namespaces y cgroups.
+
+**Porque puedes ejecutar lo que no es confiable.** La herramienta o el proyecto corre dentro de la VM, bajo su propio kernel, con acceso por `ohmlatl shell` y `exec`. No hay directorio compartido por donde el código alcance el host; solo sale lo que copies con `ohmlatl cp`. Para empezar de cero, vuelve a generar la imagen con `ohmlatl build`. El guest tiene red con NAT y alcanza el gateway del host, así que los servicios del host que escuchan en esa IP quedan expuestos a él.
 
 **Porque la manipulación se detecta.** El kernel y el initramfs vienen del binario confiable `ohmlatl`, no del disco. El rootfs tiene integridad por sector: un sector alterado falla al leerse en lugar de ejecutar código alterado. Verifica el propio `ohmlatl` contra el SHA-256 o la firma del release.
 
