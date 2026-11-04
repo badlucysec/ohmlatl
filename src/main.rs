@@ -1,14 +1,24 @@
 mod assets;
+mod build;
 mod doctor;
 mod home;
+mod image;
+mod manifest;
 mod supervise;
 mod util;
 
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 
 const USAGE: &str = "usage:
   ohmlatl init <dir>
   ohmlatl doctor [--build|--run]
+  ohmlatl build [-f Containerfile | --from <ref>] [-t <name:tag>] [--size <n>]
+  ohmlatl podman <args>
+  ohmlatl image ls
+  ohmlatl image inspect|rm <name:tag>
+  ohmlatl image resize <name:tag> <size>
+  ohmlatl image passwd <name:tag>
   ohmlatl --version
 
 Every command accepts --home <dir>.";
@@ -49,6 +59,16 @@ fn need<T>(v: Option<T>, flag: &str) -> Result<T, String> {
 }
 
 fn run(mut args: Vec<String>) -> Result<bool, String> {
+    // Everything after `podman` belongs to Podman, --home included.
+    let p = if args.first().is_some_and(|a| a == "--home") {
+        2
+    } else {
+        0
+    };
+    if args.get(p).is_some_and(|a| a == "podman") {
+        let mut cmd = assets::podman().map_err(|e| format!("embedded podman: {e}"))?;
+        return Err(format!("podman: {}", cmd.args(&args[p + 1..]).exec()));
+    }
     let home = take(&mut args, "--home")?.map(PathBuf::from);
     let cmd = if args.is_empty() {
         String::new()
@@ -64,6 +84,32 @@ fn run(mut args: Vec<String>) -> Result<bool, String> {
         ("doctor", []) => doctor::doctor(home.as_deref(), true, true),
         ("doctor", [f]) if f == "--build" => doctor::doctor(home.as_deref(), true, false),
         ("doctor", [f]) if f == "--run" => doctor::doctor(home.as_deref(), false, true),
+        ("build", _) => {
+            let a = &mut args;
+            let o = build::Opts {
+                file: take(a, "-f")?,
+                from: take(a, "--from")?,
+                tag: take(a, "-t")?,
+                size: take(a, "--size")?
+                    .map(|s| {
+                        manifest::parse_size(&s)
+                            .filter(|n| *n > 0)
+                            .ok_or(format!("--size: bad value {s}"))
+                    })
+                    .transpose()?,
+            };
+            if !a.is_empty() {
+                return Err(format!("unexpected arguments: {}", a.join(" ")));
+            }
+            build::build(home.as_deref(), o).map(|()| true)
+        }
+        ("image", [c]) if c == "ls" => image::ls(home.as_deref()).map(|()| true),
+        ("image", [c, r]) if c == "inspect" => image::inspect(home.as_deref(), r).map(|()| true),
+        ("image", [c, r]) if c == "rm" => image::rm(home.as_deref(), r).map(|()| true),
+        ("image", [c, r, size]) if c == "resize" => {
+            image::resize(home.as_deref(), r, size).map(|()| true)
+        }
+        ("image", [c, r]) if c == "passwd" => image::passwd(home.as_deref(), r).map(|()| true),
         // Internal, P0: the supervisor run by hand (see src/supervise.rs).
         ("supervise", _) => {
             let a = &mut args;

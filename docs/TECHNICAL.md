@@ -197,8 +197,9 @@ Entradas:
 
 - Exige `ohmlatl.yaml` no diretório atual. Ele dá `user` e `vm`, e o contexto do `podman build` é esse diretório.
 - `-f Containerfile` (ou `build.containerfile`) faz `podman build`. `--from <ref>` usa uma imagem **local** (`--pull=never`); imagem remota se traz antes com `ohmlatl podman pull docker.io/...`.
-- `-t` vence `name` e `build.tag`; sem tag, `latest`.
+- `-t` vence `name` e `build.tag`; sem tag, `latest` (`-t <nome>` sozinho dá `<nome>:latest`).
 - Validação: nome `^[a-z][a-z0-9-]{0,30}$`, tag `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.
+- Na validação dentro do `unshare`, os caminhos da imagem (`/sbin/init`, `/usr/sbin/sshd`, a home, o `sftp-server`) são resolvidos com `chroot "$root" readlink -e`, para que symlinks absolutos da imagem não apontem para o host.
 - Se `images/<nome>/<tag>/` já existe, o build falha. Ele nunca sobrescreve um computador.
 
 Passos (`$BUILD` = `$XDG_CACHE_HOME/ohmlatl/build/<id>`, no host; `$PART` = `<home>/images/<nome>/.<tag>.partial`, no drive):
@@ -217,10 +218,11 @@ podman unshare sh -euc '
   root="$BUILD/root"; mkdir -m 0755 "$root"
   podman export "$CID" | tar -x --same-owner --numeric-owner \
     --xattrs --xattrs-include="*" --xattrs-exclude="security.selinux" -C "$root"
-  # validação (ver acima) roda aqui
   for p in etc etc/ssh etc/systemd etc/systemd/system etc/NetworkManager etc/NetworkManager/conf.d; do
     [ -L "$root/$p" ] && { echo "symlink em /$p na imagem" >&2; exit 1; }
   done
+  # validação (ver acima) roda aqui, depois da checagem de symlinks: um /etc que aponta
+  # para fora da árvore faria a validação ler o /etc do host
   rm -f "$root/etc/machine-id" "$root/etc/hostname" "$root/etc/hosts" \
         "$root/etc/NetworkManager/conf.d/ohmlatl.conf" \
         "$root/etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf"
@@ -228,7 +230,7 @@ podman unshare sh -euc '
   printf "%s\n" "$NAME" > "$root/etc/hostname"
   printf "127.0.0.1 localhost %s\n" "$NAME" > "$root/etc/hosts"
   rm -f "$root/etc/resolv.conf"; : > "$root/etc/resolv.conf"
-  ls "$root"/etc/ssh/ssh_host_*_key >/dev/null 2>&1 || ssh-keygen -A -f "$root"
+  ls "$root"/etc/ssh/ssh_host_*_key >/dev/null 2>&1 || ssh-keygen -A -f "$root" >&2
   install -d -m 0755 -o 0 -g 0 "$root/etc/NetworkManager/conf.d"
   printf "[main]\ndns=none\n\n[keyfile]\nunmanaged-devices=interface-name:eth0\n" \
     > "$root/etc/NetworkManager/conf.d/ohmlatl.conf"
@@ -273,7 +275,7 @@ sudo cryptsetup open --key-file=- "$PART/rootfs.luks" ohmlatl-build-<id>
 6. ext4 direto no mapper, com donos corretos:
 
 ```bash
-sudo udevadm settle
+sudo udevadm settle --exit-if-exists=/dev/mapper/ohmlatl-build-<id>
 sudo chown "$(id -u)" "$(realpath /dev/mapper/ohmlatl-build-<id>)"
 podman unshare env MKE2FS_CONFIG="$BIN/mke2fs.conf" mkfs.ext4 -q -F \
   -t ext4 -O "$FEATURES" -L rootfs -m 0 \
@@ -283,7 +285,7 @@ sudo e2fsck -fn /dev/mapper/ohmlatl-build-<id>
 sudo cryptsetup close ohmlatl-build-<id>
 ```
 
-   O `chown` vem logo antes do `mkfs` porque o udev devolve o nó para `root:disk` quando o device é fechado. O que não foi escrito continua buraco no arquivo; o ext4 não lê blocos livres, então o conteúdo deles não importa. As tabelas de inode e o journal são escritos no build (cerca de 800 MiB num disco de 32 GiB).
+   O `chown` vem logo antes do `mkfs` porque o udev devolve o nó para `root:disk` quando o device é fechado. O `settle` espera só o nó do mapper (`--exit-if-exists`), não a fila inteira: o `cryptsetup open` com suporte a udev (a flag `UDEV` de `cryptsetup --version`, padrão nas distros) só retorna depois que as regras do mapper rodaram, e a fila inteira pode ficar ocupada por muito tempo por eventos de outros devices. Exemplo real: o `nfs-common` instala `99-nfs.rules`, que roda o `nfsrahead` em cada BDI novo; cada mount `fuse-overlayfs` do Podman rootless cria um, e o `nfsrahead` espera cerca de 10 s por cada um, então um `podman build` deixa a fila ocupada por minutos e um `settle` sem `-E` estoura o tempo. O que não foi escrito continua buraco no arquivo; o ext4 não lê blocos livres, então o conteúdo deles não importa. As tabelas de inode e o journal são escritos no build (cerca de 800 MiB num disco de 32 GiB).
 
 7. Gravar `$PART/manifest.yaml` (com `name` e `tag` finais) e `rename` de `$PART` para `images/<nome>/<tag>`, no mesmo filesystem, o que preserva o sparse. O arquivo `.<tag>.lock` fica ao lado; ele é só o objeto do `flock` e pode sobrar.
 8. Trap (sucesso ou falha): `podman unshare rm -rf "$BUILD"`, `cryptsetup close` se aberto, `rm -rf "$PART"` se não renomeado, `podman rm` do container, fim do laço do `sudo`.
@@ -323,7 +325,11 @@ vm:
 
 - `format` é obrigatório; o `ohmlatl` recusa versões que não conhece. Campos desconhecidos são erro.
 - `name` e `build.tag` seguem as regras do build; `-t` sobrescreve, e o build grava os valores finais no `manifest.yaml` da imagem.
+- Obrigatórios: `format`, `name`, `user.name`, `user.uid`, `user.gid`, `vm.vcpus` e `vm.memory`. `build` e `vm.network` são opcionais.
 - `build.containerfile` é opcional com `--from`.
+- `user.name`: `^[a-z_][a-z0-9_-]{0,31}$` (ele vai para a unit do `serial-getty`).
+- Tamanhos (`vm.memory`, `--size`, `image resize`): número com unidade binária opcional (`K`, `M`, `G`, `T`, ou `KiB`, `MiB`, `GiB`, `TiB`); sem unidade, bytes.
+- O `ohmlatl` lê um subconjunto de YAML: mapas e listas em bloco, valores simples ou entre aspas, `[]` e comentários. Fluxo (`{...}`), âncoras, tags e blocos de texto são erro.
 - `user.uid` e `user.gid` entre 1 e 65534.
 - `vm.vcpus` entre 1 e 32; `vm.memory` >= 512 MiB. `run` aceita `--vcpus` e `--memory`, que valem só para aquela execução.
 - `vm.network.internet`: padrão `true`.
@@ -523,7 +529,7 @@ Arquivo esparso: o `rootfs.luks` tem dois tamanhos. O **tamanho do disco** é o 
 
 - O tamanho é o do disco que a VM enxerga, arredondado para cima até múltiplo de 1 MiB. O arquivo fica com os 16 MiB do cabeçalho LUKS (offset fixo desde o build) mais esse tamanho.
 - Exige a VM parada: o supervisor segura `flock` exclusivo no diretório da imagem enquanto a VM roda, e o `resize` pega o mesmo lock sem esperar; se não conseguir, falha. O `cryptsetup` do `resize` faz o próprio lock no `rootfs.luks`, sem conflito.
-- Pede a passphrase no TTY do host (uma vez, sem quebra de linha no stdin) e `sudo`.
+- Pede a passphrase no TTY do host (uma vez, sem quebra de linha no stdin) e `sudo`. O mapper é `ohmlatl-resize-<pid>` e é fechado também na falha.
 - Crescer: `truncate` para o tamanho novo, `cryptsetup open`, `e2fsck -f -p`, `resize2fs` (sem tamanho: ocupa o device inteiro), `cryptsetup close`. A área nova continua esparsa, menos os metadados do ext4: as tabelas de inode da área nova, cerca de 1/64 do que foi acrescentado (perto de 512 MiB a cada 32 GiB), acabam gravadas, pelo `resize2fs` ou pelo `ext4lazyinit` do guest no primeiro boot. Interrompido no meio, o ext4 continua com o tamanho antigo e basta repetir.
 - Encolher: `cryptsetup open`, `e2fsck -f -p`, `resize2fs -P` (mínimo; abaixo dele o comando recusa), `resize2fs <tamanho>`, `cryptsetup close` e só então `truncate`. Pede confirmação e recomenda backup antes, porque uma queda no meio do `resize2fs` pode corromper o ext4.
 - Erro do `e2fsck` que não seja corrigido sozinho: aborta sem mudar o tamanho.

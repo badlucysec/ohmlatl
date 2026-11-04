@@ -131,14 +131,7 @@ fn leftovers(r: &mut Report, dir: &Path, clean: bool) {
                 );
                 continue;
             }
-            for (m, backing) in &mappers {
-                if backing.starts_with(&part) {
-                    let _ = Command::new("sudo")
-                        .args(["cryptsetup", "close", m])
-                        .status();
-                }
-            }
-            match fs::remove_dir_all(&part) {
+            match clean_partial(&part, &mappers) {
                 Ok(()) => r.ok(format!("removed leftover build {}", part.display())),
                 Err(e) => r.fail(
                     format!("{}: {e}", part.display()),
@@ -159,8 +152,20 @@ fn leftovers(r: &mut Report, dir: &Path, clean: bool) {
     }
 }
 
+/// Removes the `.partial` of a dead build, closing its mappers first. Call with its lock held.
+pub fn clean_partial(part: &Path, mappers: &[(String, PathBuf)]) -> std::io::Result<()> {
+    for (m, backing) in mappers {
+        if backing.starts_with(part) {
+            let _ = Command::new("sudo")
+                .args(["cryptsetup", "close", m])
+                .status();
+        }
+    }
+    fs::remove_dir_all(part)
+}
+
 /// `ohmlatl-build-*` device-mapper names with the file behind their loop device.
-fn build_mappers() -> Vec<(String, PathBuf)> {
+pub fn build_mappers() -> Vec<(String, PathBuf)> {
     let mut out = vec![];
     for e in fs::read_dir("/sys/block").into_iter().flatten().flatten() {
         let p = e.path();
