@@ -49,7 +49,7 @@ El ejemplo de la documentación es una imagen Kali Rolling. `ohmlatl` no gestion
 | Build | Podman rootless embebido, `podman unshare` obligatorio, `mkfs` directo sobre el mapper de LUKS |
 | Runtime | un `sudo` por `run`; supervisor como la unidad de sistema `ohmlatl-<uid>-<nombre>`; el jailer baja al UID del operador |
 | Init | systemd |
-| Rootfs | LUKS2 `aes-xts-plain64` + ext4, disperso, 32 GiB por defecto; sin integrity ("let it crash") |
+| Rootfs | LUKS2 `aes-xts-plain64` + ext4, disperso, 32 GiB por defecto, `image resize` para cambiarlo; sin integrity ("let it crash") |
 | Datos | dentro del rootfs; se actualiza desde dentro; el rebuild crea una computadora nueva con tag nueva |
 | Passphrase | TTY del host en el build, `ttyS0` de la VM al arrancar; PBKDF fijo |
 | Claves | ninguna clave LUKS ni clave SSH en el disco |
@@ -161,6 +161,7 @@ ohmlatl doctor [--build|--run]
 ohmlatl build [-f Containerfile | --from <ref>] [-t <name:tag>] [--size <n>]
 ohmlatl podman <args>
 ohmlatl image ls|inspect|rm
+ohmlatl image resize <name:tag> <size>
 
 ohmlatl run <name:tag> [--vcpus n] [--memory n]
 ohmlatl stop <vm>
@@ -255,10 +256,10 @@ Limitaciones: sin integrity, así que la manipulación no se detecta con certeza
 - `ohmlatl podman <args>` con el Podman embebido y configuración propia.
 - `podman unshare` con export/tar/xattrs; `mkfs` sobre el mapper, en el disco.
 - Host keys de SSH si faltan; aviso de contraseña/clave; copia del manifest; limpieza del build.
-- `image ls/inspect/rm`.
+- `image ls/inspect/rm`, `image resize` (crecer y encoger).
 - `examples/kali` como primer ejemplo.
 
-**Listo cuando:** en la consola serial (autologin), `sudo -n true` y `getcap /bin/ping` funcionan y los archivos mantienen sus dueños; el rootfs se desbloquea con la passphrase en la consola; `e2fsck` sale limpio; la imagen Kali personalizada con `podman commit` arranca; una imagen sin systemd o sshd falla con un mensaje claro; una tag existente se rechaza; no queda nada en `~/.cache/ohmlatl/build` ni como `.partial` en el disco tras éxito o fallo.
+**Listo cuando:** en la consola serial (autologin), `sudo -n true` y `getcap /bin/ping` funcionan y los archivos mantienen sus dueños; el rootfs se desbloquea con la passphrase en la consola; `e2fsck` sale limpio; la imagen Kali personalizada con `podman commit` arranca; una imagen sin systemd o sshd falla con un mensaje claro; una tag existente se rechaza; no queda nada en `~/.cache/ohmlatl/build` ni como `.partial` en el disco tras éxito o fallo; `image resize` crece y encoge una imagen detenida, mantiene el archivo disperso y se niega con la VM corriendo o por debajo del mínimo del filesystem.
 
 ### P2: Runtime
 
@@ -278,7 +279,7 @@ Limitaciones: sin integrity, así que la manipulación no se detecta con certeza
 
 ### Futuro
 
-Sin plan detallado: `image resize`, comandos de backup/restore, `image import/export`, forwards UDP, `gc`, `--json`, completions, aarch64.
+Sin plan detallado: comandos de backup/restore, `image import/export`, forwards UDP, `gc`, `--json`, completions, aarch64.
 
 ## Pruebas
 
@@ -297,6 +298,7 @@ Sin plan detallado: `image resize`, comandos de backup/restore, `image import/ex
 - `--from` con una imagen Kali personalizada; rechazo de nombres remotos y cortos.
 - Fallo claro para una imagen sin systemd o sshd; rechazo de una tag existente; aviso sin contraseña ni clave.
 - Una passphrase sin salto de línea abre tanto en el build como al arrancar.
+- `image resize` hacia arriba y hacia abajo; rechazo con la VM corriendo y por debajo del mínimo; el archivo sigue disperso.
 - Initramfs con `cryptsetup` en `ttyS0`; reintento; passphrase incorrecta cae al rescue.
 - Jailer + TAP + PTY raw bajo `systemd-run`, con `KillMode=mixed`.
 - Ctrl-Alt-Del, `poweroff` y `systemctl stop` terminan Firecracker limpiamente.
@@ -335,7 +337,7 @@ Sin plan detallado: `image resize`, comandos de backup/restore, `image import/ex
 | Dueños incorrectos en el build | Pipeline completo en `podman unshare`; pruebas de aceptación |
 | Features de ext4 desconocidas por el `e2fsck` embebido | `mke2fs.conf` fijo; matriz con e2fsprogs antiguo y nuevo |
 | Reloj del guest incorrecto sin internet | `ptp_kvm` + `chrony` con `refclock PHC`; prueba en P0 |
-| Rootfs lleno | 32 GiB dispersos por defecto; `--size`; `image resize` en el futuro |
+| Rootfs lleno | 32 GiB dispersos por defecto; `--size`; `image resize` |
 | Disco lleno | Documentado; `doctor` verifica espacio libre |
 | Build muerto a medias | `.partial` con lock; el próximo build o `doctor --build` lo limpia |
 | Docker/ufw/firewalld descartan el tráfico | `doctor --run` lo detecta e imprime la regla |

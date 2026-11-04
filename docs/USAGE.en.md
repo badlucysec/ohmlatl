@@ -7,8 +7,9 @@ This document proposes the `ohmlatl` usage flows before implementation. It is th
 ## Concepts
 
 - **ohmlatl directory**: a directory on your USB stick or external drive, created by `ohmlatl init`. It holds the `ohmlatl` binary and `images/`. Nothing else is persistent, on the drive or on the host.
-- **Disk image**: `images/<name>/<tag>/`, with a `rootfs.luks` (LUKS2 + ext4, sparse file) and the `manifest.yaml`. It holds the whole computer, including `/home/<user>`, and the VM writes to it. It is built from a `Containerfile` or an OCI image.
+- **Disk image**: `images/<name>/<tag>/`, with a `rootfs.luks` (LUKS2 + ext4) and the `manifest.yaml`. It holds the whole computer, including `/home/<user>`, and the VM writes to it. It is built from a `Containerfile` or an OCI image.
 - **VM**: a run of an image, with resources and network. At most one VM per image name runs at a time, and it has that name.
+- **Sparse file**: the `rootfs.luks` has a disk size, what the VM sees, and an on-disk size, what is really stored on the drive. Parts never written are holes that take no space. A 32 GiB disk with 3 GiB written takes about 3 GiB. `image ls` shows both; `image resize` changes the first.
 - **Manifest**: `ohmlatl.yaml`. It declares the image name, the user, resources, and network.
 - **Forward**: a TCP port on the VM gateway (`ohmlatl-gateway`) that leads to a host service or to another VM. Besides the internet, when allowed, it is the only way out of the VM.
 - **Supervisor**: a per-VM system unit that owns Firecracker, the serial, the network, and the forwards. It is not a global daemon.
@@ -357,6 +358,21 @@ Boot it again with the same command:
 ohmlatl run kali-custom:2026-11-02
 ```
 
+To change the disk size the VM sees, with the VM stopped:
+
+```bash
+ohmlatl image resize kali-custom:2026-11-02 64G
+```
+
+```text
+Rootfs passphrase:
+[ohmlatl] kali-custom:2026-11-02: 32 GiB -> 64 GiB (2.9 GiB on disk)
+[ohmlatl] e2fsck + resize2fs
+[ohmlatl] done
+```
+
+Growing is quick and keeps the file sparse: the new space only takes room on the drive when the VM writes to it. Shrinking also works, down to what the filesystem holds; it asks for confirmation, and a backup first is wise, because a power cut in the middle can damage the filesystem. `resize` asks for `sudo` and the passphrase, and refuses while the VM is running.
+
 Removing an image asks for confirmation and is refused while its VM is running:
 
 ```bash
@@ -443,7 +459,9 @@ Use `ohmlatl console kali-custom` to attach.
 
 **Host rebooted.** VMs do not start on their own; `ohmlatl image ls` and `ohmlatl run`.
 
-**Drive full.** The sparse file cannot grow and the VM gets I/O errors. Free space on the drive and run the VM again.
+**Drive full.** The sparse file cannot take more space and the VM gets I/O errors, even if the disk the VM sees still has room. Free space on the drive and run the VM again.
+
+**Disk full inside the VM.** `ohmlatl stop`, then `ohmlatl image resize <name>:<tag> <bigger size>`, then `ohmlatl run`.
 
 **Wrong owner or `noexec` mount.** With the wrong owner, `ohmlatl` refuses and shows the `sudo chown -R` to run. With `noexec`, the binary on the drive does not start: remount without `noexec`, or use an `ohmlatl` installed on the host with `--home`.
 

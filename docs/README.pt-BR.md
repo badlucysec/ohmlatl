@@ -40,6 +40,8 @@ O `ohmlatl` não gerencia o conteúdo da imagem: ferramentas, IDEs, dados, servi
 
 **Porque um drive perdido não serve para nada sem a passphrase.** O rootfs é sempre LUKS2, e nenhuma chave fica no drive. A passphrase é digitada no terminal do host quando a imagem é gerada e no `ttyS0` da VM no boot, e existe só na memória. O kernel e o initramfs vêm do binário `ohmlatl`, não da imagem de disco. Alterar o arquivo criptografado sem a chave não injeta código: vira lixo, e o boot ou o programa quebra.
 
+**Porque o disco só ocupa o que você usa.** O `rootfs.luks` é um arquivo esparso: ele tem um tamanho de disco, o que a VM enxerga (32 GiB por padrão), e um espaço ocupado no drive bem menor, só o que foi de fato escrito. Os trechos nunca escritos são buracos que o filesystem não guarda. Um computador de 32 GiB com 3 GiB de sistema ocupa cerca de 3 GiB no pendrive, e só cresce conforme você grava. Se a VM precisar de mais espaço (ou tiver que enxergar menos), `ohmlatl image resize kali-custom:2026-11-02 64G` muda o tamanho que ela enxerga, sem rebuild.
+
 **Porque a imagem é declarativa.** `Containerfile` mais manifest descrevem o sistema. O build usa Podman rootless dentro de `podman unshare`, então donos, xattrs e capabilities ficam corretos dentro do ext4.
 
 **Porque o ciclo de vida é pequeno.** Imagem, VM. `build`, `run`, `shell`, `stop`. Sem orquestrador, sem daemon global, sem estado de VM no drive. O supervisor existe por VM e sai junto com ela.

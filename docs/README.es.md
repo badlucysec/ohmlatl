@@ -40,6 +40,8 @@ Aquí, `imagen de disco` es el artefacto que Firecracker arranca. `Imagen OCI` e
 
 **Porque un disco perdido no sirve de nada sin la passphrase.** El rootfs siempre es LUKS2, y ninguna clave queda en el disco. La passphrase se escribe en la terminal del host cuando se genera la imagen y en el `ttyS0` de la VM al arrancar, y solo existe en memoria. El kernel y el initramfs vienen del binario `ohmlatl`, no de la imagen de disco. Alterar el archivo cifrado sin la clave no inyecta código: se convierte en basura, y el arranque o el programa se rompe.
 
+**Porque el disco solo ocupa lo que usas.** El `rootfs.luks` es un archivo disperso: tiene un tamaño de disco, lo que la VM ve (32 GiB por defecto), y un espacio ocupado en el disco externo mucho menor, solo lo que realmente se escribió. Las partes nunca escritas son huecos que el filesystem no guarda. Una computadora de 32 GiB con 3 GiB de sistema ocupa unos 3 GiB en el pendrive, y solo crece a medida que escribes. Si la VM necesita más espacio (o debe ver menos), `ohmlatl image resize kali-custom:2026-11-02 64G` cambia el tamaño que ve, sin rebuild.
+
 **Porque la imagen es declarativa.** `Containerfile` más manifest describen el sistema. El build usa Podman rootless dentro de `podman unshare`, así que dueños, xattrs y capabilities quedan correctos dentro del ext4.
 
 **Porque el ciclo de vida es pequeño.** Imagen, VM. `build`, `run`, `shell`, `stop`. Sin orquestador, sin daemon global, sin estado de VM en el disco. El supervisor existe por VM y termina con ella.

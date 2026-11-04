@@ -49,7 +49,7 @@ The documentation example is a Kali Rolling image. `ohmlatl` does not manage ima
 | Build | Embedded rootless Podman, `podman unshare` required, `mkfs` straight onto the LUKS mapper |
 | Runtime | one `sudo` per `run`; supervisor as the system unit `ohmlatl-<uid>-<name>`; jailer drops to the operator's UID |
 | Init | systemd |
-| Rootfs | LUKS2 `aes-xts-plain64` + ext4, sparse, 32 GiB default; no integrity ("let it crash") |
+| Rootfs | LUKS2 `aes-xts-plain64` + ext4, sparse, 32 GiB default, `image resize` to change; no integrity ("let it crash") |
 | Data | inside the rootfs; updated from the inside; rebuild creates a new computer with a new tag |
 | Passphrase | host TTY at build, VM `ttyS0` at boot; fixed PBKDF |
 | Keys | no LUKS key and no SSH key on the drive |
@@ -161,6 +161,7 @@ ohmlatl doctor [--build|--run]
 ohmlatl build [-f Containerfile | --from <ref>] [-t <name:tag>] [--size <n>]
 ohmlatl podman <args>
 ohmlatl image ls|inspect|rm
+ohmlatl image resize <name:tag> <size>
 
 ohmlatl run <name:tag> [--vcpus n] [--memory n]
 ohmlatl stop <vm>
@@ -255,10 +256,10 @@ Limitations: no integrity, so tampering is not detected for sure, and sectors or
 - `ohmlatl podman <args>` with the embedded Podman and its own configuration.
 - `podman unshare` with export/tar/xattrs; `mkfs` onto the mapper on the drive.
 - SSH host keys if missing; password/key warning; manifest copy; build cleanup.
-- `image ls/inspect/rm`.
+- `image ls/inspect/rm`, `image resize` (grow and shrink).
 - `examples/kali` as the first example.
 
-**Done when:** on the serial console (autologin), `sudo -n true` and `getcap /bin/ping` work and files keep their owners; the rootfs unlocks with the passphrase on the console; `e2fsck` is clean; the customized Kali image from `podman commit` boots; an image without systemd or sshd fails with a clear message; an existing tag is refused; nothing is left in `~/.cache/ohmlatl/build` or as `.partial` on the drive after success or failure.
+**Done when:** on the serial console (autologin), `sudo -n true` and `getcap /bin/ping` work and files keep their owners; the rootfs unlocks with the passphrase on the console; `e2fsck` is clean; the customized Kali image from `podman commit` boots; an image without systemd or sshd fails with a clear message; an existing tag is refused; nothing is left in `~/.cache/ohmlatl/build` or as `.partial` on the drive after success or failure; `image resize` grows and shrinks a stopped image, keeps the file sparse, and refuses while the VM runs or below the filesystem's minimum.
 
 ### P2: Runtime
 
@@ -278,7 +279,7 @@ Limitations: no integrity, so tampering is not detected for sure, and sectors or
 
 ### Future
 
-Not planned in detail: `image resize`, backup/restore commands, `image import/export`, UDP forwards, `gc`, `--json`, completions, aarch64.
+Not planned in detail: backup/restore commands, `image import/export`, UDP forwards, `gc`, `--json`, completions, aarch64.
 
 ## Tests
 
@@ -297,6 +298,7 @@ Not planned in detail: `image resize`, backup/restore commands, `image import/ex
 - `--from` with a customized Kali image; refusal of remote and short names.
 - Clear failure for an image without systemd or sshd; refusal of an existing tag; warning without password or key.
 - Passphrase without a trailing newline opens both at build and at boot.
+- `image resize` up and down; refusal while running and below the minimum; the file stays sparse.
 - Initramfs with `cryptsetup` on `ttyS0`; retry; wrong passphrase drops to rescue.
 - Jailer + TAP + raw PTY under `systemd-run`, with `KillMode=mixed`.
 - Ctrl-Alt-Del, `poweroff`, and `systemctl stop` end Firecracker cleanly.
@@ -335,7 +337,7 @@ Not planned in detail: `image resize`, backup/restore commands, `image import/ex
 | Wrong ownership in build | Entire pipeline in `podman unshare`; acceptance tests |
 | ext4 features unknown to the embedded `e2fsck` | Fixed `mke2fs.conf`; matrix with old and new e2fsprogs |
 | Guest clock wrong without internet | `ptp_kvm` + `chrony` with `refclock PHC`; P0 test |
-| Rootfs full | 32 GiB sparse default; `--size`; `image resize` in the future |
+| Rootfs full | 32 GiB sparse default; `--size`; `image resize` |
 | Drive full | Documented; `doctor` checks free space |
 | Build killed halfway | `.partial` with a lock; the next build or `doctor --build` cleans it up |
 | Docker/ufw/firewalld drop the traffic | `doctor --run` detects and prints the rule |

@@ -283,7 +283,7 @@ Supervisor (root, unit de sistema, sobrevive ao logout):
 2. Rede, sob `flock /run/ohmlatl/net.lock` (ver Rede): aloca o `/30`, cria o TAP e as regras, grava `/run/ohmlatl/net/<uid>-<nome>`.
 3. Abre os listeners dos forwards e do DNS.
 4. Abre o PTY e coloca o slave em modo raw (`cfmakeraw`), para o eco do host nunca devolver a passphrase para a saída.
-5. Prepara o chroot do jailer: bind mount read-only de `vmlinux` e `initramfs`, bind mount read-write de `rootfs.luks` (do operador, 0600, no drive), dentro de `/run/ohmlatl/jail/firecracker/<uid>-<nome>/root/`. O drive não é confiável para o root: `manifest.yaml` e `rootfs.luks` são abertos com `openat2(RESOLVE_NO_SYMLINKS)`, têm que ser arquivo regular com dono `--uid`, e o bind mount usa `/proc/self/fd/<n>` do arquivo já aberto. Symlink, device ou dono errado: falha.
+5. Prepara o chroot do jailer: bind mount read-only de `vmlinux` e `initramfs`, bind mount read-write de `rootfs.luks` (do operador, 0600, no drive), dentro de `/run/ohmlatl/jail/firecracker/<uid>-<nome>/root/`. O supervisor segura `flock` exclusivo no `rootfs.luks` até sair, o que impede `image resize` e `image rm` com a VM rodando. O drive não é confiável para o root: `manifest.yaml` e `rootfs.luks` são abertos com `openat2(RESOLVE_NO_SYMLINKS)`, têm que ser arquivo regular com dono `--uid`, e o bind mount usa `/proc/self/fd/<n>` do arquivo já aberto. Symlink, device ou dono errado: falha.
 6. Chama o jailer direto, sem `--daemonize`, com o PTY slave em stdin, stdout e stderr:
 
 ```bash
@@ -395,6 +395,19 @@ O `doctor --run` detecta firewall de outra tabela que descarta o tráfego (polic
 
 - `image ls` lê `images/`; `image inspect` mostra manifest, tamanho lógico e ocupado.
 - `image rm <nome:tag>` recusa imagem de VM rodando e pede confirmação.
+- `image resize <nome:tag> <tamanho>` muda o tamanho do disco que a VM enxerga. Ver abaixo.
+Arquivo esparso: o `rootfs.luks` tem dois tamanhos. O **tamanho do disco** é o que a VM enxerga (32 GiB por padrão) e é o que o `truncate` define. O **espaço ocupado** é o que de fato está gravado no drive. Os trechos nunca escritos são buracos: o filesystem do host não guarda nada para eles e devolve zeros na leitura. Por isso um disco de 32 GiB com 3 GiB escritos ocupa cerca de 3 GiB, e o espaço ocupado só cresce quando o guest escreve. O `image ls` mostra os dois. Apagar arquivos dentro do guest não devolve espaço ao drive (sem discard no MVP).
+
+`image resize <nome:tag> <tamanho>`:
+
+- O tamanho é o do disco que a VM enxerga, arredondado para cima até múltiplo de 1 MiB. O arquivo fica com o offset de dados do LUKS (lido do cabeçalho) mais esse tamanho.
+- Exige a VM parada: o supervisor segura `flock` exclusivo no `rootfs.luks` enquanto a VM roda, e o `resize` pega o mesmo lock sem esperar; se não conseguir, falha.
+- Pede a passphrase no TTY do host (uma vez, sem quebra de linha no stdin) e `sudo`.
+- Crescer: `truncate` para o tamanho novo, `cryptsetup open`, `e2fsck -f -p`, `resize2fs` (sem tamanho: ocupa o device inteiro), `cryptsetup close`. A área nova continua esparsa; só os metadados do ext4 da área nova são gravados. Interrompido no meio, o ext4 continua com o tamanho antigo e basta repetir.
+- Encolher: `cryptsetup open`, `e2fsck -f -p`, `resize2fs -P` (mínimo; abaixo dele o comando recusa), `resize2fs <tamanho>`, `cryptsetup close` e só então `truncate`. Pede confirmação e recomenda backup antes, porque uma queda no meio do `resize2fs` pode corromper o ext4.
+- Erro do `e2fsck` que não seja corrigido sozinho: aborta sem mudar o tamanho.
+- O espaço livre do drive não limita o tamanho anunciado, mas o guest recebe erro de I/O se o drive encher; o comando avisa quando a soma dos tamanhos das imagens passa do tamanho do drive.
+
 - Trocar a passphrase, com a VM parada:
 
 ```bash
