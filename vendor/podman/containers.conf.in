@@ -1,5 +1,12 @@
+[containers]
+init_path = "@PREFIX@/usr/local/lib/podman/catatonit"
+
 [engine]
+runtime = "crun"
 cgroup_manager = "cgroupfs"
 events_logger = "file"
-helper_binaries_dir = ["@PREFIX@/usr/local/lib/podman", "@PREFIX@/usr/local/libexec/podman"]
+helper_binaries_dir = ["@PREFIX@/usr/local/lib/podman", "@PREFIX@/usr/local/libexec/podman", "@PREFIX@/usr/local/bin"]
 conmon_path = ["@PREFIX@/usr/local/lib/podman/conmon"]
+
+[engine.runtimes]
+crun = ["@PREFIX@/usr/local/bin/crun"]

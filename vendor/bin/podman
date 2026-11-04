@@ -5,7 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 PREFIX="$ROOT/podman/v6.1.4"
 RUNTIME="${XDG_RUNTIME_DIR:-/tmp}/ohmlatl-podman"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/ohmlatl/podman"
-RUNROOT="$RUNTIME/storage-run"
+RUNROOT="$RUNTIME/run"
 GRAPHROOT="$CACHE/storage"
 
 umask 077

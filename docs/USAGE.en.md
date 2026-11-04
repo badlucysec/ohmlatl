@@ -20,7 +20,7 @@ This document proposes the `ohmlatl` usage flows before implementation. It is th
 While there is no release:
 
 ```bash
-cargo xtask assets          # kernel + initramfs with Buildroot; the first run takes 40 to 60 minutes
+cargo xtask assets          # kernel + initramfs (Buildroot) + Podman bundle; the first run takes 40 to 60 minutes
 cargo build --release
 ./target/release/ohmlatl --version
 ```
@@ -79,7 +79,7 @@ DRIVE
 BUILD
   [ok] podman rootless
   [ok] subuid/subgid (65536 ids)
-  [ok] newuidmap setuid
+  [ok] newuidmap (setuid or file caps)
   [ok] e2fsprogs 1.47
   [ok] cryptsetup 2.7
 
@@ -92,7 +92,7 @@ RUN
   [ok] no foreign firewall drop
 ```
 
-If something fails, the command prints the suggested fix and exits non-zero.
+If something fails, the command prints the suggested fix and exits non-zero. On Ubuntu 23.10 and later, which restrict user namespaces through AppArmor, `doctor --build` shows a small AppArmor profile for the embedded Podman and the two commands to install it once.
 
 ## 3. First example: custom disk image
 
@@ -383,10 +383,10 @@ ohmlatl image rm kali-custom:2026-11-02
 To change the passphrase, with the VM stopped:
 
 ```bash
-cryptsetup luksChangeKey --pbkdf argon2id --pbkdf-memory 262144 \
-  --pbkdf-parallel 1 --pbkdf-force-iterations 4 \
-  /media/$USER/drive/ohmlatl/images/kali-custom/2026-11-02/rootfs.luks
+ohmlatl image passwd kali-custom:2026-11-02
 ```
+
+It asks for the current passphrase and the new one twice, and refuses while the VM is running.
 
 ## 8. Update: inside or rebuild
 

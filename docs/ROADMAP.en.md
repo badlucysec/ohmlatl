@@ -163,6 +163,7 @@ ohmlatl build [-f Containerfile | --from <ref>] [-t <name:tag>] [--size <n>]
 ohmlatl podman <args>
 ohmlatl image ls|inspect|rm
 ohmlatl image resize <name:tag> <size>
+ohmlatl image passwd <name:tag>
 
 ohmlatl run <name:tag> [--vcpus n] [--memory n]
 ohmlatl stop <vm>
@@ -259,7 +260,7 @@ Limitations: no integrity, so tampering is not detected for sure, and sectors or
 - `ohmlatl podman <args>` with the embedded Podman and its own configuration.
 - `podman unshare` with export/tar/xattrs; `mkfs` onto the mapper on the drive.
 - SSH host keys if missing; password/key warning; manifest copy; build cleanup.
-- `image ls/inspect/rm`, `image resize` (grow and shrink).
+- `image ls/inspect/rm`, `image resize` (grow and shrink), `image passwd`.
 - `examples/kali` as the first example.
 
 **Done when:** on the serial console (autologin), `sudo -n true` and `getcap /bin/ping` work and files keep their owners; the rootfs unlocks with the passphrase on the console; `e2fsck` is clean; the customized Kali image from `podman commit` boots; an image without systemd or sshd fails with a clear message; an existing tag is refused; nothing is left in `~/.cache/ohmlatl/build` or as `.partial` on the drive after success or failure; `image resize` grows and shrinks a stopped image, keeps the file sparse, and refuses while the VM runs or below the filesystem's minimum.

@@ -25,6 +25,7 @@ Detalhes técnicos do `ohmlatl`. Este documento é a fonte de verdade para artef
         ├── <tag>/
         │   ├── rootfs.luks          # LUKS2 + ext4, esparso, 0600
         │   └── manifest.yaml        # manifest usado no build, com name/tag finais, 0600
+        ├── .<tag>.lock              # objeto do flock do build; pode sobrar, vazio
         └── .<tag>.partial/          # só durante um build
 ```
 
@@ -61,7 +62,9 @@ Fora do drive, no host, ficam só coisas temporárias:
     └── error                      # falha do supervisor, lida pela CLI
 
 $XDG_CACHE_HOME/ohmlatl/           # padrão: ~/.cache/ohmlatl; só no host onde se faz build
-├── bin/<sha256>/                  # Podman extraído
+├── bin/<sha256>/                  # só no build: mke2fs.conf, bin/{podman,crun,fuse-overlayfs,fusermount3,pasta,pasta.avx2},
+│                                  #   lib/podman/{conmon,catatonit,netavark,aardvark-dns,rootlessport}, etc/containers/policy.json
+├── conf/                          # containers.conf, storage.conf e registries.conf gerados
 ├── podman/                        # storage do Podman: cache, guarda sistemas em claro
 └── build/<id>/                    # rootfs exportado durante o build, apagado no fim e na falha
 ```
@@ -74,21 +77,37 @@ $XDG_CACHE_HOME/ohmlatl/           # padrão: ~/.cache/ohmlatl; só no host onde
 O `ohmlatl` embute com `include_bytes!`:
 
 - Firecracker e jailer (`vendor/firecracker`).
-- Bundle Podman, compilado por `cargo xtask assets` com a receita do podman-static v6.1.4 (ver Geração dos assets): `podman`, `crun`, `conmon`, `netavark`, `aardvark-dns`, `rootlessport`, `pasta`, `fuse-overlayfs`, `fusermount3`, `catatonit`, `etc/containers/policy.json`. O `runc` e o `passt` avulso não entram.
+- Bundle Podman, compilado por `cargo xtask assets` com a receita do podman-static v6.1.4 (ver Geração dos assets): `podman`, `crun`, `conmon`, `netavark`, `aardvark-dns`, `rootlessport`, `pasta`, `pasta.avx2` (o `pasta` reexecuta essa variante em CPUs com AVX2), `fuse-overlayfs`, `fusermount3`, `catatonit`, `etc/containers/policy.json`. O `runc` e o `passt` avulso não entram.
 - Kernel `vmlinux`, `initramfs.cpio.gz` e `mke2fs.conf`, gerados no repositório.
 
 O build extrai o Podman para `$XDG_CACHE_HOME/ohmlatl/bin/<sha256>/`. O `launch` (root) extrai Firecracker, jailer, kernel, initramfs e uma cópia do próprio `ohmlatl` para `/run/ohmlatl/bin/<sha256>/`. A extração é atômica: escreve num diretório temporário ao lado e faz `rename()` para `<sha256>/`; se o destino já existe, reaproveita. O hash é do binário `ohmlatl`, então versões diferentes não se misturam e duas execuções simultâneas nunca veem uma extração pela metade. Como a unit roda a cópia em `/run`, nada da VM depende do binário no drive depois que ela sobe.
 
 O `ohmlatl` gera em runtime a configuração do Podman (hoje feita pelo `vendor/bin/podman`, a partir de `vendor/podman/*.conf.in`):
 
-- `containers.conf` e `storage.conf` (driver overlay com `fuse-overlayfs`, sem `ignore_chown_errors`);
+- `containers.conf` com todos os caminhos apontando para o bundle extraído (`<b>` = `$XDG_CACHE_HOME/ohmlatl/bin/<sha256>`, com um layout próprio, o do podman-static sem o prefixo `usr/local`: `<b>/bin/` e `<b>/lib/podman/`; no podman-static, `pasta` e `pasta.avx2` são symlinks para `passt` e `passt.avx2`, e aqui entram como arquivos reais, copiados desreferenciados), para nada do host ser usado no lugar: `runtime = "crun"` com `[engine.runtimes] crun = ["<b>/bin/crun"]`, `conmon_path = ["<b>/lib/podman/conmon"]`, `helper_binaries_dir = ["<b>/lib/podman", "<b>/bin"]` (netavark, aardvark-dns e rootlessport no primeiro; `pasta` e `pasta.avx2` no segundo) e, em `[containers]`, `init_path = "<b>/lib/podman/catatonit"`. O Podman procura o `crun` primeiro em caminhos fixos do sistema (`/usr/bin/crun` e outros) e só depois no bundle; sem essa configuração, um `crun` do host seria usado;
+- `storage.conf` (driver overlay com `mount_program` = `<b>/bin/fuse-overlayfs`, sem `ignore_chown_errors`, `graphroot = $XDG_CACHE_HOME/ohmlatl/podman/storage`, `runroot = $XDG_RUNTIME_DIR/ohmlatl-podman/run`);
 - `registries.conf` com `unqualified-search-registries = []` e `short-name-mode = "enforcing"`: imagem remota precisa de nome qualificado (`docker.io/...`).
+
+Os três arquivos ficam em `$XDG_CACHE_HOME/ohmlatl/conf/`. Toda chamada ao Podman (build, `podman unshare`, `ohmlatl podman`) recebe `CONTAINERS_CONF`, `CONTAINERS_STORAGE_CONF`, `CONTAINERS_REGISTRIES_CONF` apontando para eles, `CONTAINERS_POLICY_JSON=<b>/etc/containers/policy.json` (sem ele, um host sem `containers-common` falha com "no policy.json file found") e `CONTAINERS_HELPER_BINARY_DIR=<b>/lib/podman`, como o `vendor/bin/podman` faz hoje.
 
 Requisitos do host:
 
-- Build: Podman rootless (`newuidmap`/`newgidmap` setuid, pelo menos 65536 ids em `/etc/subuid` e `/etc/subgid`, `/dev/fuse`), `e2fsprogs` >= 1.45 (`mkfs.ext4 -d` com xattrs e o feature set fixo), `cryptsetup` >= 2.1, `ssh-keygen` com `-A -f`, `udevadm`, `sudo`.
+- Build: Podman rootless (`newuidmap`/`newgidmap` setuid root ou com file capability `cap_setuid`/`cap_setgid`, como no Fedora; pelo menos 65536 ids em `/etc/subuid` e `/etc/subgid`, `/dev/fuse`), `e2fsprogs` >= 1.45 (`mkfs.ext4 -d` com xattrs e o feature set fixo), `cryptsetup` >= 2.1, `ssh-keygen` com `-A -f`, `udevadm`, `sudo`.
+- AppArmor (Ubuntu 23.10 em diante e derivados): com `kernel.apparmor_restrict_unprivileged_userns=1`, só programas com perfil AppArmor que libere `userns` conseguem criar user namespace com capabilities, e o perfil que a distro traz cobre só `/usr/bin/podman`. O Podman extraído pelo `ohmlatl` fica sempre em `~/.cache/ohmlatl/bin/<sha256>/bin/podman` (raiz fixa, para um glob cobrir todas as versões; no AppArmor, `*` não atravessa `/`). Quando o sysctl está em 1, o `doctor --build` falha e mostra o perfil e os comandos para instalá-lo uma vez:
+
+  ```text
+  # /etc/apparmor.d/ohmlatl-podman
+  abi <abi/4.0>,
+  include <tunables/global>
+  profile ohmlatl-podman /home/*/.cache/ohmlatl/bin/*/bin/podman flags=(unconfined) {
+    userns,
+    include if exists <local/ohmlatl-podman>
+  }
+  ```
+
+  `sudo apparmor_parser -r /etc/apparmor.d/ohmlatl-podman`. Com `XDG_CACHE_HOME` fora de `/home/*/.cache`, o `doctor` gera o caminho certo. O runtime (supervisor, jailer, Firecracker) roda como root e não é afetado.
 - Run: kernel >= 5.10 (Firecracker v1.17, nat na família `inet`, `openat2`), `/dev/kvm`, `/dev/net/tun`, `ip`, `nft`, cgroup v2, systemd com `systemd-run`, cliente `ssh`, `sudo`.
-- `image resize` e troca de passphrase: `cryptsetup` >= 2.1 e `e2fsprogs` >= 1.45 (`e2fsck`, `resize2fs`). O `resize` confere sozinho e o `doctor --run` também.
+- `image resize` e `image passwd`: `cryptsetup` >= 2.1 e `e2fsprogs` >= 1.45 (`e2fsck`, `resize2fs`). O `resize` confere sozinho e o `doctor --run` também.
 
 `sudo ohmlatl` equivale a root. Quem pode rodar o `ohmlatl` com sudo pode virar root; é o mesmo nível de quem já tem sudo.
 
@@ -104,8 +123,9 @@ Gerados no repositório com Buildroot e embutidos no binário. Não existe `ohml
 assets/
 ├── Containerfile                  # ambiente de build: debian:bookworm fixado por digest + dependências do Buildroot
 ├── podman/
-│   ├── podman.lock                # tag e commit do podman-static, digest da imagem Alpine que ele usa, versão e SHA-256 de cada fonte
-│   └── capture-sources.sh         # guarda as fontes exatas do bundle (ver abaixo)
+│   ├── podman.lock                # tag e commit do podman-static, digests das 3 imagens base, versões dos pacotes apk, versão e SHA-256 de cada fonte
+│   ├── pin-bases.patch            # troca as bases do Dockerfile do podman-static pelos digests do lock
+│   └── capture-sources.sh         # guarda as fontes exatas e os avisos de cada estágio (ver abaixo)
 ├── buildroot.lock                 # versão do Buildroot (LTS 2026.02.x) + SHA-256 do tarball
 ├── mke2fs.conf                    # escrito à mão (ver abaixo)
 ├── br2-external/
@@ -114,36 +134,58 @@ assets/
 │   └── board/ohmlatl/
 │       ├── linux-firecracker-6.18.config   # cópia de resources/guest_configs/microvm-kernel-ci-x86_64-6.18.config do Firecracker v1.17.0, com SHA-256 anotado
 │       ├── linux.fragment                  # as opções da lista abaixo
-│       ├── check-kconfig.sh                # confere que cada opção do fragmento ficou =y no .config final
+│       ├── check-kconfig.sh                # confere o .config final contra o fragmento: cada =y ficou =y, cada "is not set" ficou desligada
+│       ├── post-build.sh                   # tira do initramfs o que não é usado (mke2fs, tune2fs, veritysetup, integritysetup...)
+│       ├── check-brconfig.sh               # falha se busybox, cryptsetup ou e2fsprogs sumiram do .config do Buildroot
 │       └── overlay/{init,etc/e2fsck.conf}
 └── out/                           # gerado, fora do git: vmlinux, initramfs.cpio.gz, podman/ (bundle), sources/, SHA256SUMS
 ```
 
 - `cargo xtask assets` usa o `podman` do host (é um requisito só de quem compila o `ohmlatl`, não de quem usa) e tem duas etapas:
   1. **Kernel e initramfs:** baixa o Buildroot do `buildroot.lock` e confere o SHA-256, constrói o container de `assets/Containerfile`, roda `make ohmlatl_defconfig && make && make legal-info` dentro dele com `BR2_EXTERNAL=/work/assets/br2-external` e copia `vmlinux`, `initramfs.cpio.gz` e o `legal-info` para `assets/out/`.
-  2. **Bundle Podman:** roda o `Dockerfile` do podman-static na tag e no commit do `podman.lock`, sobre a imagem Alpine fixada por digest, e copia os binários para `assets/out/podman/`. O `capture-sources.sh` roda dentro do mesmo build e guarda em `assets/out/sources/podman/`: os tarballs de cada componente nas versões compiladas (podman, conmon, crun, netavark, aardvark-dns, passt, fuse-overlayfs, libfuse, catatonit), o próprio `Dockerfile` e scripts do podman-static, a lista exata dos pacotes `apk` instalados (`apk info -v`) e, para cada biblioteca estática ligada, o `APKBUILD` do `aports` na mesma versão com os arquivos de fonte dele. Uma versão que não bate com o `podman.lock` falha o build.
+  2. **Bundle Podman:** o `Dockerfile` do podman-static v6.1.4 tem três bases fixas no texto (`alpine:3.24`, `golang:1.27-alpine3.24`, `rust:1.98-alpine3.24`) e cerca de dez estágios, cada um com `apk add` sem versão. O xtask:
+     - aplica `pin-bases.patch`, que troca as três bases pelos digests do `podman.lock` e instala em cada estágio exatamente a lista de pacotes `apk` do lock, inclusive as dependências, cada um como `pkg=versão` (a lista é o `apk info -v` completo daquele estágio);
+     - constrói cada estágio com `--target <estágio>` e, de cada um, extrai os binários e roda `capture-sources.sh`, que guarda em `assets/out/sources/podman/<estágio>/`: o tarball do componente na versão compilada, `apk info -v`, o `APKBUILD` do `aports` de cada biblioteca estática ligada com os arquivos de fonte dele, e os avisos de licença das dependências embutidas (os `LICENSE`/`NOTICE` de cada módulo em `vendor/` do podman e do conmon, e `cargo about` sobre netavark e aardvark-dns);
+     - monta o bundle final com o último estágio e copia para `assets/out/podman/`.
+
+     Se uma versão de pacote do lock sumiu do mirror do Alpine, o build falha e diz para rodar `cargo xtask assets --update-lock`, que regrava o `podman.lock` com as versões atuais; essa mudança entra num commit e é revisada como qualquer outra. O release usa o lock do commit, sem `--update-lock`.
 
   No fim, gera o `SHA256SUMS` de `assets/out/`. Os diretórios de download e de `ccache` ficam em `~/.cache/ohmlatl-assets/`, então só o primeiro build é longo (40 a 60 minutos, por causa da toolchain).
 - `ohmlatl_defconfig`:
-  - toolchain interna musl, `BR2_STATIC_LIBS=y`, `BR2_REPRODUCIBLE=y`, base de CPU x86_64 genérica (sem `-march=native`);
-  - kernel `BR2_LINUX_KERNEL_CUSTOM_VERSION` 6.18.x (LTS; o Firecracker v1.17 testa 5.10, 6.1 e 6.18, com suporte ao 6.18 até pelo menos 06/2028), config `linux-firecracker-6.18.config` + `linux.fragment`, saída `vmlinux` (`BR2_LINUX_KERNEL_VMLINUX=y`); depois do build do kernel, `check-kconfig.sh` falha se alguma opção do fragmento não ficou `=y` (o merge de config descarta em silêncio opções com dependência faltando);
-  - pacotes: BusyBox, cryptsetup (com `cryptsetup` estático), e2fsprogs (só `e2fsck`);
+  - toolchain interna musl, `BR2_SHARED_LIBS=y` (o padrão), `BR2_REPRODUCIBLE=y`, base de CPU x86_64 genérica (sem `-march=native`), `BR2_ROOTFS_POST_BUILD_SCRIPT` = `post-build.sh`;
+  - kernel `BR2_LINUX_KERNEL_CUSTOM_VERSION` 6.18.x (LTS; o Firecracker v1.17 testa 5.10, 6.1 e 6.18, com suporte ao 6.18 até pelo menos 06/2028), config `linux-firecracker-6.18.config` + `linux.fragment`, saída `vmlinux` (`BR2_LINUX_KERNEL_VMLINUX=y`), `BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y` e `BR2_LINUX_KERNEL_NEEDS_HOST_LIBELF=y` (a base tem `SYSTEM_TRUSTED_KEYRING` e `OBJTOOL`, que precisam de libcrypto e libelf no host do build); depois do build do kernel, `check-kconfig.sh` falha se alguma opção do fragmento não ficou como pedido (o merge de config descarta em silêncio opções com dependência faltando);
+  - pacotes: BusyBox, cryptsetup com o backend de criptografia do kernel (`--with-crypto_backend=kernel`, que é o que o Buildroot escolhe sem OpenSSL/gcrypt/nettle; ele usa a interface AF_ALG, por isso o fragmento liga `CRYPTO_USER_API_HASH` e `CRYPTO_USER_API_SKCIPHER`), e2fsprogs. O Buildroot instala o e2fsprogs inteiro; o `post-build.sh` deixa só o `e2fsck`, mantendo as bibliotecas que `busybox`, `cryptsetup` e `e2fsck` usam (a lista começa pelo interpretador de cada executável, o `PT_INTERP` de `readelf -l`, que na musl é `/lib/ld-musl-x86_64.so.1`, e segue pelo fecho recursivo dos `NEEDED` de `readelf -d`, dos executáveis e das bibliotecas; cada nome é mantido junto com o symlink e o arquivo real a que ele aponta). O Buildroot não deixa compilar cryptsetup com `BR2_STATIC_LIBS` (o pacote depende de `!BR2_STATIC_LIBS`, por causa de lvm2 e libargon2), e uma opção com dependência faltando some do `.config` sem aviso; por isso o build também roda `check-brconfig.sh`, que falha se `BR2_PACKAGE_BUSYBOX`, `BR2_PACKAGE_CRYPTSETUP` ou `BR2_PACKAGE_E2FSPROGS` não estiverem `=y` no `.config` final;
   - rootfs `BR2_TARGET_ROOTFS_CPIO=y` com gzip, a partir do `overlay/`. Esse cpio é o initramfs.
 - `build.rs` do `ohmlatl`: falha com "rode `cargo xtask assets`" se faltar algum arquivo de `assets/out/` ou se o `SHA256SUMS` não bater; `OHMLATL_ASSETS_DIR` aponta para outro diretório. Os arquivos entram por `include_bytes!`, junto com o Firecracker e o jailer do `vendor/firecracker`.
 - O release gera os assets do zero, num container limpo, e publica o `legal-info` e o `sources/podman/` como o tarball de fontes.
 
 A config do Firecracker é feita para o kernel de microVM do Amazon Linux e não tem garantia em kernel upstream; o `check-kconfig.sh` e o boot de teste do P0 cobrem esse risco.
 
-Kernel: `CONFIG_MODULES=n` (tudo embutido; o guest não carrega módulos). O fragmento garante, além do que já vem na base:
+Kernel: `# CONFIG_MODULES is not set` (tudo embutido; o guest não carrega módulos). O fragmento garante, além do que já vem na base, estas opções `=y`:
 
-- Plataforma: `VIRTIO_MMIO`, `VIRTIO_MMIO_CMDLINE_DEVICES`, `VIRTIO_BLK`, `VIRTIO_NET`, `HW_RANDOM_VIRTIO`, `SERIAL_8250`, `SERIAL_8250_CONSOLE`, `INPUT`, `INPUT_KEYBOARD`, `SERIO_I8042`, `KEYBOARD_ATKBD`, `VT` (o Ctrl-Alt-Del passa pelo teclado do VT), `PTP_1588_CLOCK_KVM`, `KVM_GUEST`.
+- Plataforma: `VIRTIO_MMIO`, `VIRTIO_BLK`, `VIRTIO_NET`, `HW_RANDOM_VIRTIO`, `SERIAL_8250`, `SERIAL_8250_CONSOLE`, `INPUT`, `INPUT_KEYBOARD`, `SERIO_I8042`, `KEYBOARD_ATKBD`, `VT` (o Ctrl-Alt-Del passa pelo teclado do VT), `PTP_1588_CLOCK_KVM`, `KVM_GUEST`.
 - Boot e systemd: `BLK_DEV_INITRD`, `RD_GZIP`, `DEVTMPFS`, `DEVTMPFS_MOUNT`, `TMPFS`, `TMPFS_POSIX_ACL`, `FHANDLE`, `AUTOFS_FS`, `CGROUPS` (v2, cpu, memory, pids, io, bpf), `SECCOMP`, `UNIX`, `INET`, `IP_PNP`, `EPOLL`, `SIGNALFD`, `TIMERFD`, `INOTIFY_USER`.
-- Disco: `BLK_DEV_DM`, `DM_CRYPT`, `CRYPTO_AES_NI_INTEL`, `CRYPTO_XTS`, `EXT4_FS`, `EXT4_FS_POSIX_ACL`, `EXT4_FS_SECURITY`, `VFAT_FS`, `ISO9660_FS`, `SQUASHFS`, `OVERLAY_FS`, `FUSE_FS`.
+- Disco: `MD` (o `BLK_DEV_DM` fica dentro dele no Kconfig), `BLK_DEV_DM`, `DM_CRYPT`, `CRYPTO_AES_NI_INTEL`, `CRYPTO_XTS`, `CRYPTO_USER_API_HASH`, `CRYPTO_USER_API_SKCIPHER` (AF_ALG, para o backend do cryptsetup), `EXT4_FS`, `EXT4_FS_POSIX_ACL`, `EXT4_FS_SECURITY`, `VFAT_FS` com `NLS_CODEPAGE_437`, `NLS_ISO8859_1` e `NLS_UTF8` (sem módulos, o vfat não monta sem eles), `ISO9660_FS`, `SQUASHFS`, `OVERLAY_FS`, `FUSE_FS`.
 - Rede e containers dentro do guest: `NETFILTER`, `NF_TABLES` (inet, nat, masq, reject), `NETFILTER_XTABLES` com os matches usados pelo `iptables-nft`, `BRIDGE`, `VETH`, `TUN`, `WIREGUARD`, `NAMESPACES` (net, user, pid, ipc, uts, cgroup), `BPF_SYSCALL`, `IPV6`.
 
-Initramfs: BusyBox, `cryptsetup` e `e2fsck` estáticos do Buildroot, `/init` em shell, `/etc/e2fsck.conf` com `broken_system_clock = 1`. O `e2fsck` é o do e2fsprogs que o Buildroot fixa (1.47.x); o feature set do `mke2fs.conf` é anterior a ele, então ele sempre entende o ext4 gerado no host.
+Initramfs: BusyBox, `cryptsetup` e `e2fsck` do Buildroot, ligados dinamicamente contra a musl, com o loader e as bibliotecas que eles usam (libcryptsetup, libdevmapper, json-c, popt, libargon2, libblkid, libuuid, libext2fs, libcom_err, libe2p; a lista final é a que o `post-build.sh` calcula) dentro do cpio, `/init` em shell, `/etc/e2fsck.conf` com `broken_system_clock = 1`. O `e2fsck` é o do e2fsprogs que o Buildroot fixa (1.47.x); o feature set do `mke2fs.conf` é anterior a ele, então ele sempre entende o ext4 gerado no host.
 
-`mke2fs.conf` embutido: `base_features = sparse_super,large_file,filetype,resize_inode,dir_index,ext_attr` e perfil ext4 com `has_journal,extent,huge_file,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize`, sem `orphan_file` e sem `metadata_csum_seed`. `ext_attr` é obrigatório: sem ele o `mkfs -d` perde xattrs e capabilities. O build usa `MKE2FS_CONFIG` apontando para ele e passa `-O` com a lista completa (base + perfil), então o resultado não depende da distro do host.
+`mke2fs.conf` embutido, completo:
+
+```ini
+[defaults]
+	base_features = sparse_super,large_file,filetype,resize_inode,dir_index,ext_attr
+	blocksize = 4096
+	inode_size = 256
+	inode_ratio = 16384
+
+[fs_types]
+	ext4 = {
+		features = has_journal,extent,huge_file,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize
+	}
+```
+
+Sem `orphan_file` e sem `metadata_csum_seed`. `ext_attr` é obrigatório: sem ele o `mkfs -d` perde xattrs e capabilities. `inode_size = 256` dá espaço para `extra_isize` (timestamps além de 2038). O build usa `MKE2FS_CONFIG` apontando para ele e passa também `-O` com a lista completa (base + ext4), então o resultado não depende da distro do host.
 
 ## Build
 
@@ -176,13 +218,19 @@ podman unshare sh -euc '
   podman export "$CID" | tar -x --same-owner --numeric-owner \
     --xattrs --xattrs-include="*" --xattrs-exclude="security.selinux" -C "$root"
   # validação (ver acima) roda aqui
+  for p in etc etc/ssh etc/systemd etc/systemd/system etc/NetworkManager etc/NetworkManager/conf.d; do
+    [ -L "$root/$p" ] && { echo "symlink em /$p na imagem" >&2; exit 1; }
+  done
+  rm -f "$root/etc/machine-id" "$root/etc/hostname" "$root/etc/hosts" \
+        "$root/etc/NetworkManager/conf.d/ohmlatl.conf" \
+        "$root/etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf"
   : > "$root/etc/machine-id"
   printf "%s\n" "$NAME" > "$root/etc/hostname"
   printf "127.0.0.1 localhost %s\n" "$NAME" > "$root/etc/hosts"
   rm -f "$root/etc/resolv.conf"; : > "$root/etc/resolv.conf"
   ls "$root"/etc/ssh/ssh_host_*_key >/dev/null 2>&1 || ssh-keygen -A -f "$root"
   install -d -m 0755 -o 0 -g 0 "$root/etc/NetworkManager/conf.d"
-  printf "[keyfile]\nunmanaged-devices=interface-name:eth0\n" \
+  printf "[main]\ndns=none\n\n[keyfile]\nunmanaged-devices=interface-name:eth0\n" \
     > "$root/etc/NetworkManager/conf.d/ohmlatl.conf"
   for u in systemd-networkd.service systemd-networkd-wait-online.service \
            systemd-resolved.service; do
@@ -207,10 +255,12 @@ podman unshare sh -euc '
 5. LUKS. Antes, `sudo -v`; durante o resto do build, um laço em segundo plano roda `sudo -n -v` a cada 60 s, para o sudo não pedir senha de novo no meio de um `mkfs` demorado:
 
 ```bash
+umask 077
+mkdir -p -m 0700 "images/<nome>"
 exec 9>"images/<nome>/.<tag>.lock"; flock -n 9 || exit 1   # lock do build, antes de tudo
 # $PART que já existe aqui, com o lock livre, é sobra de build morto: limpar (ver abaixo)
 mkdir "$PART"
-truncate -s $((SIZE + 16 * 1024 * 1024)) "$PART/rootfs.luks"
+truncate -s $((SIZE + 16 * 1024 * 1024)) "$PART/rootfs.luks"; chmod 0600 "$PART/rootfs.luks"
 sudo cryptsetup luksFormat --batch-mode --type luks2 \
   --cipher aes-xts-plain64 --key-size 512 --sector-size 4096 --offset 32768 \
   --pbkdf argon2id --pbkdf-memory 262144 --pbkdf-parallel 1 --pbkdf-force-iterations 4 \
@@ -226,7 +276,7 @@ sudo cryptsetup open --key-file=- "$PART/rootfs.luks" ohmlatl-build-<id>
 sudo udevadm settle
 sudo chown "$(id -u)" "$(realpath /dev/mapper/ohmlatl-build-<id>)"
 podman unshare env MKE2FS_CONFIG="$BIN/mke2fs.conf" mkfs.ext4 -q -F \
-  -T ohmlatl -O "$FEATURES" -L rootfs -m 0 \
+  -t ext4 -O "$FEATURES" -L rootfs -m 0 \
   -E lazy_itable_init=0,lazy_journal_init=0,nodiscard \
   -d "$BUILD/root" /dev/mapper/ohmlatl-build-<id>
 sudo e2fsck -fn /dev/mapper/ohmlatl-build-<id>
@@ -309,22 +359,21 @@ CLI (usuário):
 ```bash
 systemctl reset-failed ohmlatl-<uid>-<nome> 2>/dev/null || true
 systemd-run --unit ohmlatl-<uid>-<nome> \
-  -p Delegate=yes -p KillMode=mixed -p TimeoutStopSec=150 -p RequiresMountsFor=<home> \
-  -p BindsTo=<unit do mount> -p After=<unit do mount> \
+  -p Delegate=yes -p KillMode=mixed -p TimeoutStopSec=150 \
+  -p 'BindsTo="<unit do mount>"' -p 'After="<unit do mount>"' \
   -p "ExecStopPost=/run/ohmlatl/bin/<sha256>/ohmlatl cleanup <uid> <nome>" \
   /run/ohmlatl/bin/<sha256>/ohmlatl supervise --uid <uid> --gid <gid> --home <dir> --image <nome>:<tag> ...
 ```
 
-   A unit roda a cópia em `/run/ohmlatl/bin`, então trocar ou apagar o binário do drive com a VM rodando não quebra o cleanup. `RequiresMountsFor` faz o systemd parar a VM antes de desmontar o drive no desligamento do host. `BindsTo` na unit do mount do drive (`systemd-escape --path --suffix=mount <ponto de montagem>`, com o ponto achado por `findmnt -T <home>`) também para a VM se o drive for desmontado por fora do systemd. Se o diretório não está num mount próprio (`/`), os dois ficam de fora. `KillMode=mixed` manda o SIGTERM só para o supervisor, que desliga o guest; sem isso o systemd mataria o Firecracker direto.
+   A unit roda a cópia em `/run/ohmlatl/bin`, então trocar ou apagar o binário do drive com a VM rodando não quebra o cleanup. `BindsTo` e `After` na unit do mount do drive (`systemd-escape --path --suffix=mount <ponto de montagem>`, com o ponto achado por `findmnt -T <home>`) fazem o systemd parar a VM antes de desmontar o drive no desligamento do host, e também quando o drive é desmontado por fora do systemd. O nome dessa unit tem sequências como `\x2d` e `\x20`; ele vai entre aspas e com cada `\` dobrado, porque o `systemd-run` remove as barras ao separar o valor e procuraria uma unit que não existe. (Não se usa `RequiresMountsFor`: um caminho com espaço, como o label `USB DISK`, não sobrevive a um `daemon-reload` na unit transitória.) Se o diretório não está num mount próprio (`/`), as duas propriedades ficam de fora. O systemd expande `$VAR` e `${VAR}` nos argumentos de `ExecStart` e `ExecStopPost`, então cada `$` dos argumentos (um label de drive pode ter) é passado como `$$`. `KillMode=mixed` manda o SIGTERM só para o supervisor, que desliga o guest; sem isso o systemd mataria o Firecracker direto.
 
 Supervisor (root, unit de sistema, sobrevive ao logout):
 
 1. Lê o `manifest.yaml` da imagem no drive. Qualquer falha a partir daqui vai para `error` (do operador) e para o journal.
-2. Rede, sob `flock /run/ohmlatl/net.lock` (ver Rede): aloca o `/30`, cria o TAP e as regras, grava `/run/ohmlatl/net/<uid>-<nome>`.
-3. Abre os listeners dos forwards e do DNS.
-4. Abre o PTY e coloca o slave em modo raw (`cfmakeraw`), para o eco do host nunca devolver a passphrase para a saída.
-5. Prepara o chroot do jailer: bind mount read-only de `vmlinux` e `initramfs`, bind mount read-write de `rootfs.luks` (do operador, 0600, no drive), dentro de `/run/ohmlatl/jail/firecracker/<uid>-<nome>/root/`. O supervisor segura `flock` exclusivo no diretório da imagem (`images/<nome>/<tag>/`, aberto com `O_DIRECTORY`) até sair, o que impede `image resize`, `image rm` e troca de passphrase com a VM rodando. O lock é no diretório, não no `rootfs.luks`, porque o próprio `cryptsetup` faz `flock` no arquivo da imagem e travaria contra o nosso. O drive não é confiável para o root: o supervisor abre o `--home` (já resolvido com `realpath` pela CLI) e, relativo a ele, abre `manifest.yaml` e `rootfs.luks` com `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`; os dois têm que ser arquivo regular com dono `--uid`, e o bind mount usa `/proc/self/fd/<n>` do arquivo já aberto. Symlink, device ou dono errado: falha.
-6. Chama o jailer direto, sem `--daemonize`, com o PTY slave em stdin, stdout e stderr:
+2. Rede, sob `flock /run/ohmlatl/net.lock` (ver Rede), nesta ordem: aloca o `/30` e o nome `ohm<N>` e grava logo `/run/ohmlatl/net/<uid>-<nome>` com os dois, antes de criar qualquer coisa; cria o TAP com o endereço do gateway; abre os listeners dos forwards e do DNS em `<gw>:0` (o bind com `SO_BINDTODEVICE` precisa do TAP pronto); cria as regras nft com as portas efêmeras que os listeners receberam. Assim, uma falha ou um kill em qualquer ponto deixa o registro que o cleanup precisa.
+3. Abre o PTY e coloca o slave em modo raw (`cfmakeraw`), para o eco do host nunca devolver a passphrase para a saída.
+4. Prepara o chroot do jailer: bind mount read-only de `vmlinux` e `initramfs`, bind mount read-write de `rootfs.luks` (do operador, 0600, no drive), dentro de `/run/ohmlatl/jail/firecracker/<uid>-<nome>/root/`. O supervisor segura `flock` exclusivo no diretório da imagem (`images/<nome>/<tag>/`, aberto com `O_DIRECTORY`) até sair, o que impede `image resize`, `image rm` e `image passwd` com a VM rodando. O lock é no diretório, não no `rootfs.luks`, porque o próprio `cryptsetup` faz `flock` no arquivo da imagem e travaria contra o nosso. O drive não é confiável para o root: o supervisor abre o `--home` (já resolvido com `realpath` pela CLI) e, relativo a ele, abre `manifest.yaml` e `rootfs.luks` com `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`; os dois têm que ser arquivo regular com dono `--uid`, e o bind mount usa `/proc/self/fd/<n>` do arquivo já aberto. Symlink, device ou dono errado: falha.
+5. Chama o jailer direto, sem `--daemonize`, com o PTY slave em stdin, stdout e stderr:
 
 ```bash
 jailer --id <uid>-<nome> --exec-file /run/ohmlatl/bin/<sha256>/firecracker \
@@ -335,14 +384,14 @@ jailer --id <uid>-<nome> --exec-file /run/ohmlatl/bin/<sha256>/firecracker \
 
    `--parent-cgroup` é o cgroup da unit, lido de `/proc/self/cgroup` sem a `/` inicial (o jailer recusa caminho absoluto). Sem `--cgroup`, o jailer põe o Firecracker nesse cgroup, então o systemd enxerga e mata o processo junto com a unit. O jailer cria `/dev/kvm` e `/dev/net/tun` no chroot para o UID do operador. O log do Firecracker vai para `/run/firecracker.log` dentro do chroot, e o supervisor repassa para o journal; assim ele não se mistura com o serial no PTY.
 
-7. Configura pela API (`/run/ohmlatl/jail/firecracker/<uid>-<nome>/root/run/api.sock`):
+6. Configura pela API (`/run/ohmlatl/jail/firecracker/<uid>-<nome>/root/run/api.sock`):
    - `boot-source`: `vmlinux`, `initramfs`, cmdline (abaixo);
    - `drives/rootfs`: `rootfs.luks`, `is_root_device: false`, `is_read_only: false`, `cache_type: "Writeback"` (o padrão `Unsafe` ignora flush do guest e arrisca corromper o ext4 numa queda de energia);
    - `network-interfaces/eth0`: `host_dev_name: ohm<N>`;
    - `machine-config`: vcpus e memória;
    - `entropy`: virtio-rng;
    - `actions`: `InstanceStart`.
-8. Grava `ip`, cria `ctl.sock` e `console.sock` com `chown <uid>:<gid>` e modo 0600, responde `ready`. Copia a saída do PTY para o cliente do console e para `serial.log` (buffer circular de 1 MiB, do operador). Ao anexar, o cliente recebe primeiro os últimos 64 KiB do buffer, então o prompt da passphrase aparece mesmo se já tiver sido impresso.
+7. Grava `ip`, cria `ctl.sock` e `console.sock` com `chown <uid>:<gid>` e modo 0600, responde `ready`. Copia a saída do PTY para o cliente do console e para `serial.log` (buffer circular de 1 MiB, do operador). Ao anexar, o cliente recebe primeiro os últimos 64 KiB do buffer, então o prompt da passphrase aparece mesmo se já tiver sido impresso.
 
 Cmdline:
 
@@ -352,7 +401,7 @@ console=ttyS0 reboot=k panic=1 ip=<guest>::<gw>:255.255.255.252:<nome>:eth0:off
 
 `/init` do initramfs:
 
-1. Monta `proc`, `sys`, `devtmpfs`. `cryptsetup` e rescue rodam em primeiro plano, com o console como stdin. Antes do `switch_root`, nada desliga o Ctrl-Alt-Del do kernel (`C_A_D` continua 1; só o systemd faz `reboot(CAD_OFF)`), então o Ctrl-Alt-Del do `stop` reinicia o kernel na hora e, com `reboot=k`, o Firecracker sai: o `stop` no prompt da passphrase ou no rescue é imediato.
+1. Monta `proc`, `sys`, `devtmpfs` e um tmpfs em `/run` (com `/run/cryptsetup`, o diretório de lock do `cryptsetup`). `cryptsetup` e rescue rodam em primeiro plano, com o console como stdin. Antes do `switch_root`, nada desliga o Ctrl-Alt-Del do kernel (`C_A_D` continua 1; só o systemd faz `reboot(CAD_OFF)`), então o Ctrl-Alt-Del do `stop` reinicia o kernel na hora e, com `reboot=k`, o Firecracker sai: o `stop` no prompt da passphrase ou no rescue é imediato.
 2. `cryptsetup open --tries 3 /dev/vda root`, perguntando no `ttyS0` (`Enter passphrase for /dev/vda:`). Três falhas: rescue.
 3. `e2fsck -p /dev/mapper/root`. Código >= 4: rescue.
 4. Monta `/dev/mapper/root` em `/newroot`.
@@ -384,7 +433,7 @@ Opções de SSH (nada vem do `~/.ssh/config` do operador):
 
 ## Stop
 
-1. A CLI manda `stop` pelo `ctl.sock`. O SIGTERM do systemd (`systemctl stop`, desligamento do host) leva ao mesmo caminho.
+1. A CLI manda `stop` pelo `ctl.sock`. O SIGTERM do systemd (`systemctl stop`, desligamento do host) leva ao mesmo caminho. A CLI só retorna quando `systemctl show -p ActiveState ohmlatl-<uid>-<nome>` dá `inactive` ou `failed`, ou seja, depois do `ExecStopPost`; assim um `run` logo em seguida não esbarra na unit ainda saindo.
 2. O supervisor manda `PUT /actions {"action_type": "SendCtrlAltDel"}` no `api.sock`.
 3. O systemd do guest executa `ctrl-alt-del.target`, um reboot limpo. Com `reboot=k`, o reboot encerra o Firecracker. Dentro do guest, `poweroff`, `halt` e `reboot` também encerram a VM, porque os targets apontam para `reboot.target` (o Firecracker não tem power off).
 4. Se o Firecracker não sair em 120 s (acima dos 90 s padrão do systemd), o supervisor mata.
@@ -394,7 +443,7 @@ Cleanup (`ohmlatl cleanup <uid> <nome>`), idempotente. Roda no fim do supervisor
 
 1. Mata o Firecracker se ainda estiver vivo.
 2. Desmonta os bind mounts e remove o chroot.
-3. Sob o lock de rede, lê `/run/ohmlatl/net/<uid>-<nome>`: remove o TAP e as regras da VM; se não sobrar nenhum TAP `ohm*`, remove a tabela `inet ohmlatl`; apaga o registro.
+3. Sob o lock de rede, lê `/run/ohmlatl/net/<uid>-<nome>`: remove o TAP, se existir, os elementos `ohm<N>` dos mapas e o gateway de `gws`, e as cadeias `vm<N>_*` (o que não existir é ignorado); se não sobrar nenhum TAP `ohm*`, remove a tabela `inet ohmlatl`; apaga o registro.
 4. Encerra a conexão SSH mestre (`ssh -F /dev/null -o ControlPath=.../ssh.sock -O exit ohmlatl`; o destino é só um placeholder, que o `ssh` exige) e depois remove `ctl.sock`, `console.sock`, `ssh.sock` e `ip`. `serial.log` e `error` ficam até o próximo `run`.
 
 ## Rede
@@ -402,25 +451,57 @@ Cleanup (`ohmlatl cleanup <uid> <nome>`), idempotente. Roda no fim do supervisor
 Alocação, sob `flock /run/ohmlatl/net.lock`:
 
 - Antes de alocar, o supervisor confere o pool (`172.31.0.0/16`, ou `OHMLATL_POOL`): se algum endereço ou rota do host que não seja de `ohm*` nem a rota padrão cai dentro dele, recusa subir e manda usar `OHMLATL_POOL`.
-- O `/30` é o primeiro livre no pool que não pertence a outro registro em `/run/ohmlatl/net/`. É alocado a cada `run`; o guest nunca depende do IP, porque usa `ohmlatl-gateway`. Uma rede remota que usa a mesma faixa mas é alcançada pela rota padrão (por exemplo, uma VPC) não é detectável: nesse caso, configure `OHMLATL_POOL`.
-- TAP `ohm<N>` (primeiro N livre): `ip tuntap add dev ohm<N> mode tap user <uid>`, `ip addr add <gw>/30 dev ohm<N>`, `sysctl net.ipv6.conf.ohm<N>.disable_ipv6=1`, `ip link set ohm<N> up`.
+- O `/30` é o primeiro livre no pool que não pertence a outro registro em `/run/ohmlatl/net/` nem já está atribuído a alguma interface `ohm*` (sobra de um supervisor morto antes do cleanup). É alocado a cada `run`; o guest nunca depende do IP, porque usa `ohmlatl-gateway`. Uma rede remota que usa a mesma faixa mas é alcançada pela rota padrão (por exemplo, uma VPC) não é detectável: nesse caso, configure `OHMLATL_POOL`.
+- TAP `ohm<N>` (primeiro N que não está numa interface nem em nenhum registro de `/run/ohmlatl/net/`): `ip tuntap add dev ohm<N> mode tap user <uid>`, `ip addr add <gw>/30 dev ohm<N>`, `sysctl net.ipv6.conf.ohm<N>.disable_ipv6=1` (pulado se `/proc/sys/net/ipv6` não existe, num host com `ipv6.disable=1`), `ip link set ohm<N> up`.
 - `net.ipv4.ip_forward=1`. Nunca é restaurado: outros serviços (Docker) podem passar a depender dele. Se estava desligado e `/run/ohmlatl/net/forward-was-off` ainda não existe, o supervisor grava esse arquivo e cria a tabela `inet ohmlatl-fwguard` **antes** de ligar o `ip_forward`, sempre sob o lock de rede, com `iifname != "ohm*" oifname != "ohm*" drop` no `forward`, para o host não virar roteador entre as outras interfaces (LAN, VPN). Essa tabela não é apagada pelo cleanup; fica até o reboot. Efeito colateral: um Docker ou libvirt iniciado depois não roteia enquanto ela existir. O `doctor --run` mostra a trava e o comando para tirá-la (`sudo nft delete table inet ohmlatl-fwguard`).
 
-Tabela `inet ohmlatl` (criada se não existe), com os sets `gws` (IPs de gateway em uso) e `blocked` (`flags interval`: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `100.64.0.0/10` e as redes conectadas do host, inclusive públicas, atualizadas pelo supervisor a cada mudança de rota via netlink). Por VM, regras marcadas com o comentário `<uid>-<nome>`:
+Tabela `inet ohmlatl` (criada se não existe). As regras gerais existem uma vez por tabela, nas cadeias base. Cada VM tem cadeias regulares próprias (`vm<N>_raw`, `vm<N>_nat`, `vm<N>_in`, `vm<N>_fwd`, `vm<N>_out`), alcançadas pelas cadeias base por mapas de veredito indexados pelo nome do TAP. Assim a ordem nunca depende de qual VM subiu primeiro: o `vmap` decide a VM, e só o que a cadeia dela não aceitar cai nas regras gerais que vêm depois. Testado com `nft -c` e com carga e remoção de uma VM num namespace isolado:
 
-- `prerouting` (filter, prioridade raw): `iifname "ohm<N>" ip saddr != <guest> drop`; IPv6 de `ohm*`: drop.
-- `prerouting` (nat): `iifname "ohm<N>" ip daddr <gw> tcp dport <port> redirect to :<porta efêmera>` para cada forward; com `internet: true`, o mesmo para 53/udp e 53/tcp.
-- `input` (filter):
-  - `ip daddr @gws iifname != "lo" iifname != "ohm*" drop`: ninguém de fora (LAN) chega nos gateways nem nos listeners. Só os IPs de gateway, nunca o pool inteiro, para não afetar um host que tenha rede própria na mesma faixa;
-  - `iifname "ohm<N>" ct state established,related accept`;
-  - `iifname "ohm<N>" ip daddr <gw> ct status dnat ct original proto-dst { <ports> } accept` (e 53 com `internet: true`);
-  - `iifname "ohm*" reject`: o guest não alcança nenhum outro serviço do host, e falha na hora.
-- `forward` (filter):
-  - `oifname "ohm*" ct state established,related accept`; `oifname "ohm*" drop`: LAN e outras VMs não chegam no guest;
-  - `iifname "ohm*" ip daddr @blocked reject`: o guest não alcança LAN nem outras VMs;
-  - `iifname "ohm<N>" accept` com `internet: true`; `iifname "ohm<N>" reject` com `internet: false`.
-- `postrouting` (nat): `iifname "ohm*" oifname != "ohm*" masquerade`.
-- `output` (filter): `oifname "ohm<N>" meta skuid != { 0, <uid> } reject`. Só o root e o dono da VM abrem conexão do host para o guest; outros usuários locais não alcançam os serviços dele.
+```text
+table inet ohmlatl {
+  set gws     { type ipv4_addr; }                     # IPs de gateway em uso
+  set blocked { type ipv4_addr; flags interval; auto-merge; }     # RFC1918, 169.254/16, 100.64/10 e as redes conectadas do host
+  map vm_iif_raw { type ifname : verdict; }           # "ohm<N>" : jump vm<N>_raw
+  map vm_iif_nat { type ifname : verdict; }
+  map vm_iif_in  { type ifname : verdict; }
+  map vm_iif_fwd { type ifname : verdict; }
+  map vm_oif_out { type ifname : verdict; }
+
+  chain prerouting_raw  { type filter hook prerouting priority raw;
+                          iifname "ohm*" meta nfproto ipv6 drop
+                          iifname vmap @vm_iif_raw; }
+  chain prerouting_nat  { type nat hook prerouting priority dstnat;
+                          iifname vmap @vm_iif_nat; }
+  chain input           { type filter hook input priority filter;
+                          ip daddr @gws iifname != "lo" iifname != "ohm*" drop
+                          iifname vmap @vm_iif_in
+                          iifname "ohm*" reject; }
+  chain forward         { type filter hook forward priority filter;
+                          oifname "ohm*" ct state established,related accept
+                          iifname "ohm*" oifname "ohm*" reject
+                          oifname "ohm*" drop
+                          iifname "ohm*" ip daddr @blocked reject
+                          iifname vmap @vm_iif_fwd
+                          iifname "ohm*" reject; }
+  chain output          { type filter hook output priority filter;
+                          oifname vmap @vm_oif_out; }
+  chain postrouting_nat { type nat hook postrouting priority srcnat;
+                          iifname "ohm*" oifname != "ohm*" masquerade; }
+}
+```
+
+O conteúdo de `blocked` é recalculado sob o lock de rede a cada VM nova e, por cada supervisor rodando, a cada mudança de rota do host (netlink): as faixas fixas mais as redes conectadas atuais do host, gravadas numa transação só (`flush set` + `add element` no mesmo `nft -f`). A LAN comum (`192.168.1.0/24`, `10.x`) cai dentro de uma faixa fixa; o `auto-merge` junta os intervalos sobrepostos em vez de recusar o conjunto. Assim, trocar de Wi-Fi ou entrar numa LAN com endereço público não abre a LAN para os guests. O `iifname "ohm*" oifname "ohm*" reject` antes do `drop` faz uma VM que tenta alcançar outra falhar na hora, em vez de esperar timeout.
+
+Por VM (exemplo de `ohm0`, guest `172.31.0.2`, gateway `172.31.0.1`):
+
+- `vm0_raw`: `ip saddr != 172.31.0.2 drop` (anti-spoof).
+- `vm0_nat`: `ip daddr 172.31.0.1 tcp dport <port> redirect to :<porta efêmera>` para cada forward; com `internet: true`, o mesmo para 53/udp e 53/tcp.
+- `vm0_in`: `ct state established,related accept`; `ip daddr 172.31.0.1 ct status dnat ct original proto-dst { <ports> } accept` (e 53 com `internet: true`). O resto volta para a `input` e cai no `reject`.
+- `vm0_fwd`: `accept` com `internet: true`; `reject` com `internet: false`.
+- `vm0_out`: `meta skuid != { 0, <uid> } reject`. Só o root e o dono da VM abrem conexão do host para o guest.
+- Elementos: `"ohm0" : jump vm0_*` em cada mapa e `172.31.0.1` em `gws`.
+
+O que isso garante: ninguém de fora (LAN) chega nos gateways nem nos listeners (só os IPs de gateway, nunca o pool inteiro, para não afetar um host que tenha rede própria na mesma faixa); o guest não alcança nenhum outro serviço do host, nem a LAN, nem outras VMs, e falha na hora; LAN e outras VMs não chegam no guest. Subir uma VM é criar as cinco cadeias e adicionar os elementos; o cleanup remove os elementos (inclusive o de `gws`) e depois as cadeias, ignorando o que já não existir.
 
 Forwards e DNS (supervisor):
 
@@ -448,13 +529,7 @@ Arquivo esparso: o `rootfs.luks` tem dois tamanhos. O **tamanho do disco** é o 
 - Erro do `e2fsck` que não seja corrigido sozinho: aborta sem mudar o tamanho.
 - O espaço livre do drive não limita o tamanho anunciado, mas o guest recebe erro de I/O se o drive encher; o comando avisa quando a soma dos tamanhos das imagens passa do tamanho do drive.
 
-- Trocar a passphrase, com a VM parada:
-
-```bash
-cryptsetup luksChangeKey --pbkdf argon2id --pbkdf-memory 262144 \
-  --pbkdf-parallel 1 --pbkdf-force-iterations 4 \
-  <home>/images/<nome>/<tag>/rootfs.luks
-```
+- `image passwd <nome:tag>` troca a passphrase: pega o lock do diretório da imagem (falha com a VM rodando), lê a passphrase atual e a nova (com confirmação) no TTY do host e roda `cryptsetup luksChangeKey --pbkdf argon2id --pbkdf-memory 262144 --pbkdf-parallel 1 --pbkdf-force-iterations 4`, com as duas entregues por arquivo de chave em memória (`memfd`), nunca em argv. Não precisa de `sudo`: só reescreve o cabeçalho do arquivo, que é do operador.
 
 - Rebuild cria um computador novo e vazio com outra tag. Migração: com a VM antiga rodando, `ohmlatl cp` do que importa para o host; `stop`; `run` da tag nova; `ohmlatl cp` de volta. Os dados passam pelo disco do host, que é confiável.
 - Código não confiável roda numa imagem separada, nunca na imagem do computador pessoal.
@@ -491,9 +566,11 @@ Limitações:
 
 ## Doctor
 
-`doctor --build`: Podman rootless, pelo menos 65536 ids em subuid/subgid, `newuidmap`/`newgidmap` setuid, `/dev/fuse`, `e2fsprogs` >= 1.45, `cryptsetup` >= 2.1, `ssh-keygen` com `-A -f`, `udevadm`, `sudo`, espaço livre em `$XDG_CACHE_HOME`.
+`doctor --build`: Podman rootless, pelo menos 65536 ids em subuid/subgid, `newuidmap`/`newgidmap` setuid ou com `cap_setuid`/`cap_setgid`, `/dev/fuse`, perfil AppArmor do Podman quando o host restringe user namespaces (ver abaixo), `e2fsprogs` >= 1.45, `cryptsetup` >= 2.1, `ssh-keygen` com `-A -f`, `udevadm`, `sudo`, espaço livre em `$XDG_CACHE_HOME`.
 
-`doctor --run`: `/dev/kvm` acessível, `/dev/net/tun`, `ip`, `nft` com nat em `inet`, cgroup v2, `systemd-run`, `sudo`, cliente `ssh`, firewall de outra tabela com drop ou reject em FORWARD ou INPUT (Docker, ufw, firewalld).
+`doctor --run`: `/dev/kvm` acessível, `/dev/net/tun`, `ip`, `nft` com nat em `inet`, cgroup v2, `systemd-run`, `sudo`, cliente `ssh`, firewall de outra tabela com drop ou reject em FORWARD ou INPUT (Docker, ufw, firewalld); como aviso, `cryptsetup` >= 2.1 e `e2fsprogs` >= 1.45 para `image resize` e `image passwd`.
+
+Ferramentas de `sbin` (`mkfs.ext4`, `e2fsck`, `resize2fs`, `cryptsetup`, `udevadm`) são procuradas também em `/usr/sbin` e `/sbin`, além do `PATH`, porque várias distros não põem `sbin` no `PATH` do usuário comum; `doctor` e os comandos usam o caminho absoluto encontrado.
 
 Os dois conferem também o diretório do ohmlatl: filesystem ext4/btrfs/xfs, montagem sem `noexec` (aviso), dono de `images/` igual ao UID atual, sobras de build (`.partial` sem lock, mapper `ohmlatl-build-*`) e espaço livre. O `doctor --run` também mostra se a trava `inet ohmlatl-fwguard` está ativa.
 
@@ -529,7 +606,7 @@ O binário embute programas de terceiros como arquivos separados, extraídos e e
 | cryptsetup | initramfs | GPL-2.0-or-later |
 | e2fsprogs (`e2fsck`) | initramfs | GPL-2.0 |
 
-O `runc` do bundle não é embutido (o runtime é o `crun`). Bibliotecas ligadas estaticamente nesses programas (musl, libseccomp, GLib, libcap, libargon2, libdevmapper e outras) entram na mesma lista, com a licença de cada uma. Programas Apache que ligam estaticamente bibliotecas LGPL (o `podman` com a libseccomp, o `conmon` com a GLib) também têm o código-fonte publicado, para permitir religar com outra versão da biblioteca, como pede a LGPL-2.1 §6. O próprio `ohmlatl` liga musl (MIT) e crates Rust; os avisos dessas dependências são gerados com `cargo about` e entram no mesmo `THIRD-PARTY.txt`. A cada release, a tabela é conferida contra o arquivo de licença da fonte exata usada; divergência bloqueia o release.
+O `runc` do bundle não é embutido (o runtime é o `crun`). Bibliotecas ligadas estaticamente nesses programas (musl, libseccomp, GLib, libcap, libargon2, libdevmapper e outras) entram na mesma lista, com a licença de cada uma. Programas Apache que ligam estaticamente bibliotecas LGPL (o `podman` com a libseccomp, o `conmon` com a GLib) também têm o código-fonte publicado, para permitir religar com outra versão da biblioteca, como pede a LGPL-2.1 §6. O próprio `ohmlatl` liga musl (MIT) e crates Rust; os avisos dessas dependências são gerados com `cargo about` e entram no mesmo `THIRD-PARTY.txt`. O mesmo vale para as dependências embutidas no bundle Podman (módulos Go do podman e crates de netavark e aardvark-dns), cujos avisos o `capture-sources.sh` junta. A cada release, a tabela é conferida contra o arquivo de licença da fonte exata usada; divergência bloqueia o release.
 
 Artefatos de cada release:
 

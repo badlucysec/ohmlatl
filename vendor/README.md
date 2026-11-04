@@ -26,7 +26,7 @@ O release inclui `LICENSE`, `NOTICE`, `THIRD-PARTY`, `SHA256SUMS`, templates de 
 - Diretório: `vendor/podman/v6.1.4`
 - Atalho: `vendor/bin/podman`
 
-O bundle inclui `podman`, `crun`, `runc`, `conmon`, `netavark`, `aardvark-dns`, `pasta`, `fuse-overlayfs`, `catatonit`, `rootlessport` e as configurações em `etc/containers`.
+O bundle inclui `podman`, `crun`, `runc`, `conmon`, `netavark`, `aardvark-dns`, `pasta`, `pasta.avx2`, `passt`, `fuse-overlayfs`, `fusermount3`, `catatonit`, `rootlessport` e as configurações em `etc/containers`.
 
 A assinatura foi verificada com a chave acima. Para repetir:
 
@@ -42,7 +42,7 @@ O último comando espera o tarball original, que não fica no repositório.
 
 ## Uso
 
-O wrapper `vendor/bin/podman` resolve os caminhos do bundle, gera a configuração em `$XDG_RUNTIME_DIR/ohmlatl-podman` a partir de `vendor/podman/*.conf.in`, usa `vendor/podman/registries.conf` (sem busca de nomes curtos: imagem remota precisa de nome qualificado, como `docker.io/...`) e usa o storage em `$XDG_CACHE_HOME/ohmlatl/podman`, ou em `$HOME/.cache/ohmlatl/podman` quando `XDG_CACHE_HOME` não existe. Nada é instalado em `/usr/local`. O `ohmlatl` usa esse mesmo binário em `ohmlatl build` e `ohmlatl podman`.
+O wrapper `vendor/bin/podman` resolve os caminhos do bundle, gera a configuração em `$XDG_RUNTIME_DIR/ohmlatl-podman` a partir de `vendor/podman/*.conf.in`, usa `vendor/podman/registries.conf` (sem busca de nomes curtos: imagem remota precisa de nome qualificado, como `docker.io/...`) e usa o storage em `$XDG_CACHE_HOME/ohmlatl/podman`, ou em `$HOME/.cache/ohmlatl/podman` quando `XDG_CACHE_HOME` não existe. Nada é instalado em `/usr/local`. O `containers.conf` gerado fixa o `crun`, o `conmon` e o `catatonit` do bundle, para um `crun` do host não ser usado no lugar. Esse wrapper é só para desenvolvimento: o `ohmlatl` embute o bundle compilado por `cargo xtask assets` e gera a mesma configuração em Rust.
 
 ```bash
 export PATH="$PWD/vendor/bin:$PATH"
