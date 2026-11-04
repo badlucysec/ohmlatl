@@ -1,6 +1,6 @@
 # vendor
 
-Binários locais para desenvolvimento do `ohmlatl`. Eles são Linux x86_64 e ficam fora do runtime do host: o `ohmlatl` usa o Podman só no build e o Firecracker a partir do P0.
+Binários de terceiros usados pelo `ohmlatl`. São Linux x86_64. O Firecracker e o jailer daqui são embutidos no binário. O bundle Podman daqui é só para desenvolvimento e sai do git no P0: o bundle embutido passa a ser compilado por `cargo xtask assets` com a receita do podman-static, para o release ter as fontes exatas de cada componente GPL (ver `docs/TECHNICAL.md`, Geração dos assets).
 
 ## Firecracker
 
@@ -60,4 +60,4 @@ podman run --rm --network=none docker.io/library/alpine:3.20 echo ok
 - Os binários são só para `linux/x86_64`. Para `aarch64`, baixe os artefatos correspondentes.
 - O Podman static não tem integração com systemd. Ele serve para o build, não para rodar serviços no host.
 - Rootless no host ainda depende de `newuidmap`/`newgidmap`, pelo menos 65536 ids em subuid/subgid e `/dev/fuse`. O `ohmlatl doctor --build` deve validar isso. O storage não usa `ignore_chown_errors`: uma faixa de subuid pequena falha em vez de achatar os donos da imagem.
-- `vendor/` ocupa cerca de 100 MB e está versionado no Git para ser embutido no `ohmlatl`. Atualizações trocam binários e checksums no mesmo commit.
+- Hoje `vendor/` ocupa cerca de 100 MB no Git. Depois do P0 fica só o Firecracker (Apache-2.0, binário oficial) e as configurações em `vendor/podman/*.conf*`. Atualizações trocam binários e checksums no mesmo commit.

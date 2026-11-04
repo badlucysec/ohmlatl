@@ -20,6 +20,7 @@ Este documento propõe os fluxos de uso do `ohmlatl` antes da implementação. �
 Enquanto não houver release:
 
 ```bash
+cargo xtask assets          # kernel + initramfs com Buildroot; a primeira vez leva de 40 a 60 minutos
 cargo build --release
 ./target/release/ohmlatl --version
 ```
@@ -417,9 +418,16 @@ ohmlatl doctor --run
 ohmlatl run kali-custom:2026-11-02
 ```
 
-- O host tem que ser Linux x86_64 com KVM, você precisa de `sudo` nele e tem que confiar nele, mesmo emprestado: ele vê a passphrase que você digita e a memória da VM.
-- O binário no drive é tão confiável quanto o drive. Num host novo, confira o SHA-256 dele contra o do release antes de rodar, ou use um `ohmlatl` instalado no host com `--home`.
-- Se o seu UID nesse host for diferente do dono de `images/`, o `ohmlatl` para e mostra o `sudo chown -R` a rodar.
+- O host tem que ser Linux x86_64 (kernel 5.10 ou mais novo) com KVM, você precisa de `sudo` nele e tem que confiar nele, mesmo emprestado: ele vê a passphrase que você digita e a memória da VM.
+- O binário no drive é tão confiável quanto o drive. Num host novo, confira contra o release antes de rodar, ou use um `ohmlatl` instalado no host com `--home`:
+
+  ```bash
+  # SHA256SUMS e SHA256SUMS.sig vêm da página do release; allowed_signers, de docs/ no repositório
+  ssh-keygen -Y verify -f allowed_signers -I badlucysec -n file -s SHA256SUMS.sig < SHA256SUMS
+  grep ohmlatl-0.1.0-x86_64 SHA256SUMS
+  sha256sum /media/$USER/drive/ohmlatl/ohmlatl
+  ```
+- Se o seu UID nesse host for diferente do dono do diretório do ohmlatl, o `ohmlatl` para e mostra o `sudo chown -R` a rodar.
 - A configuração de rede viaja no `manifest.yaml` de cada imagem e é aplicada como está; o `run` imprime os forwards para você conferir.
 - Nada persistente fica no host. O cache do Podman fica no host onde você fez o build: para fazer rebuild em outro lugar, a cadeia de build inteira (`kali-base`, depois `kali-custom`) roda de novo lá.
 

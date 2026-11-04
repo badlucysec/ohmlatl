@@ -23,6 +23,7 @@ El ejemplo de la documentación es una imagen Kali Rolling. `ohmlatl` no gestion
 - Supervisor por VM como unidad de sistema, con serial, `console` y `logs`.
 - `shell`, `exec` y `cp` por SSH, con el login que tenga la imagen.
 - CLI pequeña, sin daemon global, sin estado de VM en el disco.
+- Release: binario estático (musl), `SHA256SUMS` firmado con la clave SSH del mantenedor (`ssh-keygen -Y`), el código fuente exacto de los componentes GPL embebidos y los avisos de terceros, también disponibles en `ohmlatl licenses`.
 
 ## No objetivos
 
@@ -45,7 +46,7 @@ El ejemplo de la documentación es una imagen Kali Rolling. `ohmlatl` no gestion
 | VMM | Firecracker con jailer |
 | Binarios | Firecracker, jailer, Podman, kernel e initramfs embebidos en `ohmlatl` |
 | Disco | ext4/btrfs/xfs; directorio de ohmlatl con el binario e `images/`; se encuentra por la ubicación del binario, `--home` u `OHMLATL_HOME` |
-| Host | Linux x86_64 con `/dev/kvm` y `sudo`, confiable aunque sea prestado; no queda nada persistente en él |
+| Host | Linux x86_64, kernel >= 5.10, con `/dev/kvm` y `sudo`, confiable aunque sea prestado; no queda nada persistente en él |
 | Build | Podman rootless embebido, `podman unshare` obligatorio, `mkfs` directo sobre el mapper de LUKS |
 | Runtime | un `sudo` por `run`; supervisor como la unidad de sistema `ohmlatl-<uid>-<nombre>`; el jailer baja al UID del operador |
 | Init | systemd |
@@ -172,6 +173,8 @@ ohmlatl cp <vm>:<path> <local>
 ohmlatl cp <local> <vm>:<path>
 ohmlatl logs <vm> [-f]
 ohmlatl console <vm>
+
+ohmlatl licenses
 ```
 
 Todos los comandos aceptan `--home <dir>`. Sin `expose`, `ingress` ni `publish`. `launch`, `supervise` y `cleanup` son internos.
@@ -244,7 +247,7 @@ Limitaciones: sin integrity, así que la manipulación no se detecta con certeza
 ### P0: Sanidad del host y arranque
 
 - `ohmlatl init` y `ohmlatl doctor`.
-- Scripts en el repositorio que generan el kernel, el initramfs y el `mke2fs.conf`.
+- Build de los assets en contenedores (`cargo xtask assets`): kernel 6.18 LTS e initramfs con Buildroot, más el bundle de Podman con la receta de podman-static, ambos con sus fuentes exactas; `mke2fs.conf` escrito a mano. Los binarios de Podman salen de `vendor/`.
 - Embeber y extraer los binarios.
 - Arrancar un rootfs LUKS de prueba desde el disco con Firecracker bajo el jailer, desde un supervisor ejecutado a mano.
 
@@ -328,6 +331,7 @@ Sin plan detallado: comandos de backup/restore, `image import/export`, forwards 
 | Riesgo | Mitigación |
 |---|---|
 | KVM no disponible/anidado | `doctor` falla temprano con instrucciones |
+| La config de kernel de Firecracker está hecha para kernels de Amazon Linux | `check-kconfig.sh` y la prueba de arranque de P0 |
 | Sin `sudo` en un host prestado | Requisito documentado; `doctor --run` lo verifica |
 | Disco quitado con una VM corriendo | `stop` antes de desmontar, documentado; `e2fsck` al arrancar |
 | UID distinto en otro host | Detectado; se imprime `sudo chown -R` |
@@ -349,8 +353,7 @@ Sin plan detallado: comandos de backup/restore, `image import/export`, forwards 
 
 ## Elementos a confirmar durante la implementación
 
-- Versión y config final del kernel del guest.
-- Licencia del proyecto, avisos de terceros y la oferta del código fuente GPL en el release.
+- Fragmento final de la config del kernel, después de las pruebas de arranque de P0.
 
 ## Criterio de MVP
 

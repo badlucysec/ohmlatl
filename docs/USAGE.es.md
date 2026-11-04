@@ -20,6 +20,7 @@ Este documento propone los flujos de uso de `ohmlatl` antes de la implementació
 Mientras no haya release:
 
 ```bash
+cargo xtask assets          # kernel + initramfs con Buildroot; la primera vez tarda de 40 a 60 minutos
 cargo build --release
 ./target/release/ohmlatl --version
 ```
@@ -417,9 +418,16 @@ ohmlatl doctor --run
 ohmlatl run kali-custom:2026-11-02
 ```
 
-- El host tiene que ser Linux x86_64 con KVM, necesitas `sudo` en él y tienes que confiar en él, aunque sea prestado: ve la passphrase que escribes y la memoria de la VM.
-- El binario en el disco es tan confiable como el disco. En un host nuevo, compara su SHA-256 con el del release antes de ejecutarlo, o usa un `ohmlatl` instalado en el host con `--home`.
-- Si tu UID en ese host es distinto del dueño de `images/`, `ohmlatl` se detiene y muestra el `sudo chown -R` a ejecutar.
+- El host tiene que ser Linux x86_64 (kernel 5.10 o más nuevo) con KVM, necesitas `sudo` en él y tienes que confiar en él, aunque sea prestado: ve la passphrase que escribes y la memoria de la VM.
+- El binario en el disco es tan confiable como el disco. En un host nuevo, compáralo con el release antes de ejecutarlo, o usa un `ohmlatl` instalado en el host con `--home`:
+
+  ```bash
+  # SHA256SUMS y SHA256SUMS.sig vienen de la página del release; allowed_signers, de docs/ en el repositorio
+  ssh-keygen -Y verify -f allowed_signers -I badlucysec -n file -s SHA256SUMS.sig < SHA256SUMS
+  grep ohmlatl-0.1.0-x86_64 SHA256SUMS
+  sha256sum /media/$USER/drive/ohmlatl/ohmlatl
+  ```
+- Si tu UID en ese host es distinto del dueño del directorio de ohmlatl, `ohmlatl` se detiene y muestra el `sudo chown -R` a ejecutar.
 - La configuración de red viaja en el `manifest.yaml` de cada imagen y se aplica tal cual; `run` imprime los forwards para que los revises.
 - No queda nada persistente en el host. La caché de Podman queda en el host donde hiciste el build: para hacer rebuild en otro lugar, toda la cadena de build (`kali-base`, luego `kali-custom`) vuelve a correr allí.
 

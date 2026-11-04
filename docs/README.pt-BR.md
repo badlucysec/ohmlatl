@@ -132,7 +132,7 @@ Dentro da VM, `ohmlatl-gateway:11434` é o Ollama do host e `ohmlatl-gateway:808
 
 ## Desenvolvimento
 
-Os binários locais ficam em `vendor/`. Eles são a fonte dos binários embutidos:
+O Firecracker e o jailer ficam em `vendor/`; o bundle Podman de lá é só para desenvolvimento e sai do repositório no P0:
 
 ```bash
 export PATH="$PWD/vendor/bin:$PATH"
@@ -140,7 +140,7 @@ firecracker --version
 podman --version
 ```
 
-Versões, checksums e limites estão em [vendor/README.md](../vendor/README.md).
+Versões, checksums e limites estão em [vendor/README.md](../vendor/README.md). O `cargo xtask assets` gera em containers o kernel e o initramfs do guest (Buildroot) e o bundle Podman embutido (receita do podman-static), com as fontes exatas de cada componente GPL; precisa de `podman` no host. O release já traz tudo isso dentro do binário.
 
 ## Status
 
@@ -148,4 +148,4 @@ Pré-alfa. O repositório ainda é o scaffold Rust; os documentos descrevem o co
 
 ## Licença
 
-Ainda não definida.
+O `ohmlatl` tem licença dupla [MIT](../LICENSE-MIT) ou [Apache-2.0](../LICENSE-APACHE), à sua escolha. O binário embute programas de terceiros (Firecracker, Podman, o kernel Linux, BusyBox, cryptsetup e outros) que mantêm as próprias licenças, algumas GPL. `ohmlatl licenses` lista todos com os textos completos, e cada release publica o código-fonte exato dos componentes GPL ao lado do binário.
