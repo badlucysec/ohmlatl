@@ -188,9 +188,6 @@ fn supervise(a: &Args, bin: &Path, vmdir: &Path, held: &mut Option<OwnedFd>) -> 
         .read_to_string(&mut text)
         .map_err(|e| format!("manifest.yaml: {e}"))?;
     let m = manifest::parse(&text).map_err(|e| format!("manifest.yaml: {e}"))?;
-    if !m.forward.is_empty() {
-        return Err(FORWARD_UNSUPPORTED.into());
-    }
     let vcpus = a.vcpus.unwrap_or(m.vcpus);
     if !(1..=32).contains(&vcpus) {
         return Err(format!("--vcpus {vcpus}: want 1 to 32"));
@@ -203,10 +200,13 @@ fn supervise(a: &Args, bin: &Path, vmdir: &Path, held: &mut Option<OwnedFd>) -> 
     let rootfs = owned_file(image, "rootfs.luks", libc::O_RDWR, a.uid)?;
 
     let id = format!("{}-{}", a.uid, a.name);
-    let net = net::setup(&id, a.uid, &a.pool, m.internet)?;
+    let ports: Vec<u16> = m.forward.iter().map(|f| f.port).collect();
+    let net = net::setup(&id, a.uid, &a.pool, m.internet, &ports)?;
     if let Some((udp, tcp)) = net.dns {
         net::serve_dns(udp, tcp, net.guest);
     }
+    let fwds = net.forwards.into_iter().zip(m.forward.into_iter().map(|f| f.to));
+    net::serve_forwards(fwds.collect(), net.guest, a.uid);
     net::watch_routes();
     let vm = Vm {
         vcpus,
@@ -222,9 +222,6 @@ fn supervise(a: &Args, bin: &Path, vmdir: &Path, held: &mut Option<OwnedFd>) -> 
         .join("root");
     boot(a, &vm, bin, &root, vmdir, &rootfs)
 }
-
-pub const FORWARD_UNSUPPORTED: &str =
-    "vm.network.forward is not supported yet; remove the forwards from the image's manifest.yaml";
 
 /// `rel` below `dir`, opened with `openat2`: a regular file owned by `uid`.
 fn owned_file(dir: &OwnedFd, rel: &str, flags: i32, uid: u32) -> Result<OwnedFd, String> {

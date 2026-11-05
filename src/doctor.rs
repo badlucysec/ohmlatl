@@ -494,15 +494,13 @@ fn firewall(r: &mut Report) {
         return r.ok("no foreign firewall drop");
     }
     for (table, chain, hook) in foreign {
-        // ip/ip6 tables usually belong to iptables-nft (Docker, ufw): fix them with iptables.
-        let ipt = match table.split_once(' ') {
-            Some(("ip", _)) => Some("iptables"),
-            Some(("ip6", _)) => Some("ip6tables"),
-            _ => None,
-        };
-        let rule = |dir: &str| match ipt {
-            Some(t) => format!("sudo {t} -I {chain} -{} ohm+ -j ACCEPT", &dir[..1]),
-            None => format!("sudo nft insert rule {table} {chain} {dir}name \"ohm*\" accept"),
+        // ip tables usually belong to iptables-nft (Docker, ufw): fix them with iptables.
+        let rule = |dir: &str| {
+            if table.starts_with("ip ") {
+                format!("sudo iptables -I {chain} -{} ohm+ -j ACCEPT", &dir[..1])
+            } else {
+                format!("sudo nft insert rule {table} {chain} {dir}name \"ohm*\" accept")
+            }
         };
         let mut fix = rule("iif");
         if hook == "forward" {
@@ -515,7 +513,9 @@ fn firewall(r: &mut Report) {
     }
 }
 
-/// (table, chain, hook) of base chains on input/forward with a drop policy or a drop/reject rule.
+/// (table, chain, hook) of base chains on input/forward with a drop policy or a drop/reject rule,
+/// in ip and inet tables: the guests are IPv4 only and routed, so ip6, bridge, arp and netdev
+/// tables never see them.
 fn foreign_drops(ruleset: &str) -> Vec<(String, String, String)> {
     let mut out = vec![];
     let (mut table, mut chain, mut hook) = (String::new(), String::new(), None::<String>);
@@ -545,6 +545,7 @@ fn foreign_drops(ruleset: &str) -> Vec<(String, String, String)> {
             }
         }
     }
+    out.retain(|(t, _, _)| t.starts_with("ip ") || t.starts_with("inet "));
     out
 }
 
@@ -567,6 +568,50 @@ mod tests {
                     "filter_FORWARD".into(),
                     "forward".into()
                 )
+            ]
+        );
+    }
+
+    /// Docker and ufw through iptables-nft, as `nft list ruleset` prints them (generated in a
+    /// user namespace). The ip6 table never sees the guests.
+    #[test]
+    fn docker_and_ufw() {
+        let rs = "# Warning: table ip filter is managed by iptables-nft, do not touch!
+table ip filter {
+	chain DOCKER {
+		iifname \"docker0\" counter packets 0 bytes 0 drop
+	}
+
+	chain FORWARD {
+		type filter hook forward priority filter; policy drop;
+		counter packets 0 bytes 0 jump DOCKER-USER
+	}
+
+	chain ufw-before-input {
+		ct state invalid counter packets 0 bytes 0 drop
+	}
+
+	chain INPUT {
+		type filter hook input priority filter; policy drop;
+		counter packets 0 bytes 0 jump ufw-before-input
+	}
+}
+table ip6 filter {
+	chain INPUT {
+		type filter hook input priority filter; policy drop;
+	}
+}
+table bridge filter {
+	chain FORWARD {
+		type filter hook forward priority filter; policy drop;
+	}
+}
+";
+        assert_eq!(
+            super::foreign_drops(rs),
+            vec![
+                ("ip filter".into(), "FORWARD".into(), "forward".into()),
+                ("ip filter".into(), "INPUT".into(), "input".into()),
             ]
         );
     }

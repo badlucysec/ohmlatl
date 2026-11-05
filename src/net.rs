@@ -25,6 +25,8 @@ const FIXED_BLOCKED: [&str; 5] = [
 ];
 /// Concurrent DNS queries per VM; more are dropped and the guest retries.
 const DNS_INFLIGHT: usize = 64;
+/// Open forward connections per VM; more are closed at once.
+const FWD_CONNS: usize = 64;
 
 const TABLE: &str = r#"table inet ohmlatl {
   set gws { type ipv4_addr; }
@@ -299,13 +301,14 @@ fn table_exists() -> Result<bool, String> {
 }
 
 /// The chains and map elements of VM `n`. `dns` is the (udp, tcp) port of the relay, with
-/// `internet: true`.
+/// `internet: true`; `fwd` is (gateway port, listener port) for each forward.
 pub fn vm_rules(
     n: u32,
     uid: u32,
     gw: Ipv4Addr,
     guest: Ipv4Addr,
     dns: Option<(u16, u16)>,
+    fwd: &[(u16, u16)],
 ) -> String {
     let t = "inet ohmlatl";
     let mut s = String::new();
@@ -317,10 +320,20 @@ pub fn vm_rules(
         s += &format!("add rule {t} vm{n}_nat ip daddr {gw} udp dport 53 redirect to :{udp}\n");
         s += &format!("add rule {t} vm{n}_nat ip daddr {gw} tcp dport 53 redirect to :{tcp}\n");
     }
+    for (port, to) in fwd {
+        s += &format!("add rule {t} vm{n}_nat ip daddr {gw} tcp dport {port} redirect to :{to}\n");
+    }
     s += &format!("add rule {t} vm{n}_in ct state established,related accept\n");
-    if dns.is_some() {
+    let ports: Vec<String> = dns
+        .map(|_| 53)
+        .into_iter()
+        .chain(fwd.iter().map(|f| f.0))
+        .map(|p| p.to_string())
+        .collect();
+    if !ports.is_empty() {
         s += &format!(
-            "add rule {t} vm{n}_in ip daddr {gw} ct status dnat ct original proto-dst {{ 53 }} accept\n"
+            "add rule {t} vm{n}_in ip daddr {gw} ct status dnat ct original proto-dst {{ {} }} accept\n",
+            ports.join(", ")
         );
     }
     let fwd = if dns.is_some() { "accept" } else { "reject" };
@@ -376,12 +389,14 @@ pub struct Net {
     pub guest: Ipv4Addr,
     /// The DNS relay sockets, with `internet: true`.
     pub dns: Option<(UdpSocket, TcpListener)>,
+    /// One listener per forward, in the order of `ports`.
+    pub forwards: Vec<TcpListener>,
 }
 
 /// Supervisor step 2, under the network lock: pool check, `/30` and TAP, recorded before
-/// anything is created; TAP; `ip_forward`; relay listeners; nft. A failure at any point leaves
-/// the record the cleanup needs.
-pub fn setup(id: &str, uid: u32, pool: &str, internet: bool) -> Result<Net, String> {
+/// anything is created; TAP; `ip_forward`; forward and relay listeners; nft. A failure at any
+/// point leaves the record the cleanup needs. `ports` are the gateway ports of the forwards.
+pub fn setup(id: &str, uid: u32, pool: &str, internet: bool, ports: &[u16]) -> Result<Net, String> {
     let pool = parse_cidr(pool).filter(|c| c.1 <= 30).ok_or(format!(
         "invalid pool {pool} (want a CIDR of /30 or larger)"
     ))?;
@@ -431,23 +446,31 @@ pub fn setup(id: &str, uid: u32, pool: &str, internet: bool) -> Result<Net, Stri
     } else {
         None
     };
-    let ports = match &dns {
+    let dns_ports = match &dns {
         Some((u, t)) => Some((
             u.local_addr().map_err(|e| e.to_string())?.port(),
             t.local_addr().map_err(|e| e.to_string())?.port(),
         )),
         None => None,
     };
+    let mut forwards = vec![];
+    let mut fwd = vec![];
+    for p in ports {
+        let l = TcpListener::from(listener(gw, &tap, libc::SOCK_STREAM)?);
+        fwd.push((*p, l.local_addr().map_err(|e| e.to_string())?.port()));
+        forwards.push(l);
+    }
     if !table_exists()? {
         nft(TABLE)?;
     }
     refresh_blocked()?;
-    nft(&vm_rules(n, uid, gw, guest, ports))?;
+    nft(&vm_rules(n, uid, gw, guest, dns_ports, &fwd))?;
     Ok(Net {
         tap,
         gw,
         guest,
         dns,
+        forwards,
     })
 }
 
@@ -575,9 +598,9 @@ fn query_udp(q: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// Counts a running query; `None` past the limit.
-fn slot(inflight: &Arc<AtomicUsize>) -> Option<Slot> {
-    if inflight.fetch_add(1, Ordering::SeqCst) >= DNS_INFLIGHT {
+/// Counts a running query or connection; `None` past `max`.
+fn slot(inflight: &Arc<AtomicUsize>, max: usize) -> Option<Slot> {
+    if inflight.fetch_add(1, Ordering::SeqCst) >= max {
         inflight.fetch_sub(1, Ordering::SeqCst);
         return None;
     }
@@ -604,7 +627,9 @@ pub fn serve_dns(udp: UdpSocket, tcp: TcpListener, guest: Ipv4Addr) {
             if src.ip() != IpAddr::V4(guest) {
                 continue;
             }
-            let Some(slot) = slot(&inf) else { continue };
+            let Some(slot) = slot(&inf, DNS_INFLIGHT) else {
+                continue;
+            };
             let (q, udp) = (buf[..n].to_vec(), udp.clone());
             std::thread::spawn(move || {
                 if let Some(r) = query_udp(&q) {
@@ -619,13 +644,13 @@ pub fn serve_dns(udp: UdpSocket, tcp: TcpListener, guest: Ipv4Addr) {
             if !c.peer_addr().is_ok_and(|a| a.ip() == IpAddr::V4(guest)) {
                 continue;
             }
-            let Some(slot) = slot(&inflight) else {
+            let Some(slot) = slot(&inflight, DNS_INFLIGHT) else {
                 continue;
             };
             std::thread::spawn(move || {
                 for ns in nameservers() {
                     if let Ok(up) = TcpStream::connect_timeout(&ns, Duration::from_secs(3)) {
-                        pipe(c, up);
+                        pipe(c, up, Some(Duration::from_secs(30)));
                         break;
                     }
                 }
@@ -635,23 +660,98 @@ pub fn serve_dns(udp: UdpSocket, tcp: TcpListener, guest: Ipv4Addr) {
     });
 }
 
-/// Copies both ways until either side closes or stays idle for 30 s.
-fn pipe(a: TcpStream, b: TcpStream) {
-    let t = Some(Duration::from_secs(30));
+/// The forwards of a VM: each listener (redirected from its gateway port) to its `to`, at most
+/// `FWD_CONNS` connections at a time. Only the guest's address is served.
+pub fn serve_forwards(fwds: Vec<(TcpListener, String)>, guest: Ipv4Addr, uid: u32) {
+    let open = Arc::new(AtomicUsize::new(0));
+    for (l, to) in fwds {
+        let open = open.clone();
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                if !c.peer_addr().is_ok_and(|a| a.ip() == IpAddr::V4(guest)) {
+                    continue;
+                }
+                let Some(slot) = slot(&open, FWD_CONNS) else {
+                    continue;
+                };
+                let to = to.clone();
+                std::thread::spawn(move || {
+                    if let Some(up) = target(&to, uid)
+                        .and_then(|a| TcpStream::connect_timeout(&a, Duration::from_secs(3)).ok())
+                    {
+                        // No idle timeout: a model loading or an event stream stays quiet.
+                        // Keepalive frees the slot when the other VM stops under the connection.
+                        keepalive(&up);
+                        pipe(c, up, None);
+                    }
+                    drop(slot);
+                });
+            }
+        });
+    }
+}
+
+/// `host:<port>` is the host's loopback. `vm/<name>:<port>` is the guest of the operator's VM
+/// `<name>` while it runs (its `ip` file exists), checked against the root-owned network
+/// registry: the `ip` file is the operator's, and root may connect to any user's VM.
+fn target(to: &str, uid: u32) -> Option<SocketAddr> {
+    let (dst, port) = to.rsplit_once(':')?;
+    let port: u16 = port.parse().ok()?;
+    let Some(name) = dst.strip_prefix("vm/") else {
+        return Some(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+    };
+    let mut ip = String::new();
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(format!("/run/ohmlatl/{uid}/{name}/ip"))
+        .ok()?
+        .take(64)
+        .read_to_string(&mut ip)
+        .ok()?;
+    let reg = fs::read_to_string(Path::new(NET).join(format!("{uid}-{name}"))).ok()?;
+    let guest = Ipv4Addr::from(parse_reg(&reg)?.1.0 + 2);
+    (ip.trim().parse::<Ipv4Addr>().ok()? == guest).then_some(SocketAddr::from((guest, port)))
+}
+
+/// TCP keepalive after 60 s idle, 3 probes 10 s apart.
+fn keepalive(s: &TcpStream) {
+    for (level, opt, v) in [
+        (libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1),
+        (libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, 60),
+        (libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 10),
+        (libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 3),
+    ] {
+        let v: libc::c_int = v;
+        unsafe {
+            libc::setsockopt(
+                s.as_raw_fd(),
+                level,
+                opt,
+                (&v as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+    }
+}
+
+/// Copies both ways, passing each side's end on as a half-close, until both ends are done.
+/// With `idle`, a side quiet for that long ends too.
+fn pipe(a: TcpStream, b: TcpStream, idle: Option<Duration>) {
     for s in [&a, &b] {
-        let _ = s.set_read_timeout(t);
-        let _ = s.set_write_timeout(t);
+        let _ = s.set_read_timeout(idle);
+        let _ = s.set_write_timeout(idle);
     }
     let (Ok(mut a2), Ok(mut b2)) = (a.try_clone(), b.try_clone()) else {
         return;
     };
     let h = std::thread::spawn(move || {
         let _ = io::copy(&mut a2, &mut b2);
-        let _ = b2.shutdown(Shutdown::Both);
+        let _ = b2.shutdown(Shutdown::Write);
     });
     let (mut a, mut b) = (a, b);
     let _ = io::copy(&mut b, &mut a);
-    let _ = a.shutdown(Shutdown::Both);
+    let _ = a.shutdown(Shutdown::Write);
     let _ = h.join();
 }
 
@@ -809,7 +909,14 @@ broadcast 192.168.0.255 dev wlan0 table local proto kernel scope link src 192.16
         let gw = Ipv4Addr::new(172, 31, 0, 1);
         let guest = Ipv4Addr::new(172, 31, 0, 2);
         assert_eq!(
-            vm_rules(0, 1000, gw, guest, Some((40001, 40002))),
+            vm_rules(
+                0,
+                1000,
+                gw,
+                guest,
+                Some((40001, 40002)),
+                &[(11434, 40003), (8080, 40004)]
+            ),
             "add chain inet ohmlatl vm0_raw
 add chain inet ohmlatl vm0_nat
 add chain inet ohmlatl vm0_in
@@ -818,8 +925,10 @@ add chain inet ohmlatl vm0_out
 add rule inet ohmlatl vm0_raw ip saddr != 172.31.0.2 drop
 add rule inet ohmlatl vm0_nat ip daddr 172.31.0.1 udp dport 53 redirect to :40001
 add rule inet ohmlatl vm0_nat ip daddr 172.31.0.1 tcp dport 53 redirect to :40002
+add rule inet ohmlatl vm0_nat ip daddr 172.31.0.1 tcp dport 11434 redirect to :40003
+add rule inet ohmlatl vm0_nat ip daddr 172.31.0.1 tcp dport 8080 redirect to :40004
 add rule inet ohmlatl vm0_in ct state established,related accept
-add rule inet ohmlatl vm0_in ip daddr 172.31.0.1 ct status dnat ct original proto-dst { 53 } accept
+add rule inet ohmlatl vm0_in ip daddr 172.31.0.1 ct status dnat ct original proto-dst { 53, 11434, 8080 } accept
 add rule inet ohmlatl vm0_fwd accept
 add rule inet ohmlatl vm0_out meta skuid != { 0, 1000 } reject
 add element inet ohmlatl vm_iif_raw { \"ohm0\" : jump vm0_raw }
@@ -831,10 +940,15 @@ add element inet ohmlatl gws { 172.31.0.1 }
 "
         );
         // internet: false: no DNS, forward rejected.
-        let off = vm_rules(3, 1001, gw, guest, None);
+        let off = vm_rules(3, 1001, gw, guest, None, &[]);
         assert!(!off.contains("redirect") && !off.contains("proto-dst"));
         assert!(off.contains("add rule inet ohmlatl vm3_fwd reject\n"));
         assert!(off.contains("meta skuid != { 0, 1001 } reject"));
+        // internet: false with a forward on 53: only TCP, and no DNS relay.
+        let off = vm_rules(3, 1001, gw, guest, None, &[(53, 40005)]);
+        assert!(!off.contains("udp"));
+        assert!(off.contains("tcp dport 53 redirect to :40005\n"));
+        assert!(off.contains("ct original proto-dst { 53 } accept\n"));
     }
 
     #[test]

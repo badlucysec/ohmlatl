@@ -92,6 +92,25 @@ fn check_memory(m: &str) -> Result<(), String> {
     }
 }
 
+/// "forwards: none", or one line per forward with the gateway side aligned.
+fn forwards(fw: &[manifest::Forward]) -> String {
+    let w = fw
+        .iter()
+        .map(|f| format!("ohmlatl-gateway:{}", f.port).len())
+        .max()
+        .unwrap_or(0);
+    fw.iter().fold(
+        if fw.is_empty() { "forwards: none" } else { "forwards:" }.to_string(),
+        |s, f| {
+            let to = match f.to.strip_prefix("vm/") {
+                Some(vm) => format!("vm {vm}"),
+                None => f.to.replacen("host:", "host 127.0.0.1:", 1),
+            };
+            format!("{s}\n  {:<w$} -> {to}", format!("ohmlatl-gateway:{}", f.port))
+        },
+    )
+}
+
 /// `ohmlatl run <name>:<tag> [--vcpus n] [--memory n]`.
 pub fn run(
     home_flag: Option<&Path>,
@@ -109,9 +128,6 @@ pub fn run(
     let text = fs::read_to_string(dir.join("manifest.yaml"))
         .map_err(|e| format!("{}: {e}", dir.join("manifest.yaml").display()))?;
     let m = manifest::parse(&text).map_err(|e| format!("manifest.yaml: {e}"))?;
-    if !m.forward.is_empty() {
-        return Err(supervise::FORWARD_UNSUPPORTED.into());
-    }
     if let Some(v) = &vcpus {
         check_vcpus(v)?;
     }
@@ -137,7 +153,7 @@ pub fn run(
         "internet: {}",
         if m.internet { "on" } else { "off" }
     ));
-    say("forwards: none");
+    say(forwards(&m.forward));
     let _ = fs::remove_file(vmdir(uid, name).join("error"));
     say("starting firecracker (jailer)");
 
@@ -616,6 +632,21 @@ mod tests {
             ]
         );
         assert_eq!(dollars("/media/u/a$b c/ohmlatl"), "/media/u/a$$b c/ohmlatl");
+    }
+
+    #[test]
+    fn forward_lines() {
+        let f = |port, to: &str| manifest::Forward {
+            port,
+            to: to.into(),
+        };
+        assert_eq!(forwards(&[]), "forwards: none");
+        assert_eq!(
+            forwards(&[f(11434, "host:11434"), f(8080, "vm/mcp:8080")]),
+            "forwards:
+  ohmlatl-gateway:11434 -> host 127.0.0.1:11434
+  ohmlatl-gateway:8080  -> vm mcp:8080"
+        );
     }
 
     #[test]

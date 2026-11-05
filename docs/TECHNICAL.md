@@ -496,7 +496,7 @@ table inet ohmlatl {
 }
 ```
 
-O conteúdo de `blocked` é recalculado sob o lock de rede a cada VM nova e, por cada supervisor rodando, a cada mudança de rota do host (netlink): as faixas fixas mais as redes conectadas atuais do host, gravadas numa transação só (`flush set` + `add element` no mesmo `nft -f`). A LAN comum (`192.168.1.0/24`, `10.x`) cai dentro de uma faixa fixa; o `auto-merge` junta os intervalos sobrepostos em vez de recusar o conjunto. Assim, trocar de Wi-Fi ou entrar numa LAN com endereço público não abre a LAN para os guests. O `iifname "ohm*" oifname "ohm*" reject` antes do `drop` faz uma VM que tenta alcançar outra falhar na hora, em vez de esperar timeout.
+O conteúdo de `blocked` é recalculado sob o lock de rede a cada VM nova e, por cada supervisor rodando, a cada mudança de rota do host (netlink): as faixas fixas mais as redes conectadas atuais do host, gravadas numa transação só (`flush set` + `add element` no mesmo `nft -f`). A LAN comum (`192.168.1.0/24`, `10.x`) cai dentro de uma faixa fixa; o `auto-merge` junta os intervalos sobrepostos em vez de recusar o conjunto. Assim, trocar de Wi-Fi ou entrar numa LAN com endereço público não abre a LAN para os guests. O `iifname "ohm*" oifname "ohm*" reject` antes do `drop` faz uma VM que tenta alcançar outra falhar na hora, em vez de esperar timeout. O `reject` responde com ICMP, e o kernel limita o ICMP por destino (`net.ipv4.icmp_ratelimit`, 1000 ms: rajada de 6, depois 1 por segundo); numa rajada de recusas para o mesmo guest, as que passam do limite caem no timeout (1 s no retransmit do TCP, 5 s no resolver). Visto no teste do P3 com 17 recusas seguidas; isoladas, todas falham em milissegundos.
 
 Por VM (exemplo de `ohm0`, guest `172.31.0.2`, gateway `172.31.0.1`):
 
@@ -513,10 +513,11 @@ Forwards e DNS (supervisor):
 
 - Cada listener escuta em `<gw>:0` (porta efêmera) com `SO_BINDTODEVICE ohm<N>` e só aceita conexão do IP do guest. Como a porta pública vira efêmera pelo `redirect`, nada colide com um listener `0.0.0.0:<porta>` do host, e o host continua livre para usar essas portas.
 - `to: host:<porta>`: conecta em `127.0.0.1:<porta>`.
-- `to: vm/<nome>:<porta>`: conecta em `<ip>:<porta>`, com o IP lido de `/run/ohmlatl/<uid>/<nome>/ip`. Sem o arquivo (VM parada), fecha a conexão. Só VMs do mesmo UID.
+- `to: vm/<nome>:<porta>`: conecta em `<ip>:<porta>`, com o IP lido de `/run/ohmlatl/<uid>/<nome>/ip`. Sem o arquivo (VM parada), fecha a conexão. Só VMs do mesmo UID. O `ip` fica num diretório do operador e quem conecta é o supervisor (root), que a cadeia `output` libera para qualquer VM; por isso o IP só vale se for o guest do registro `/run/ohmlatl/net/<uid>-<nome>` (root, 0600). Se não for, fecha a conexão.
+- No máximo 64 conexões de forward abertas por VM; as demais são fechadas na hora. Sem idle timeout (um modelo carregando ou um stream de eventos fica quieto por minutos). O lado que conecta usa keepalive TCP (60 s parado, 3 sondas a cada 10 s), para liberar a vaga quando a outra VM para no meio da conexão. O fim de um lado passa para o outro como half-close.
 - DNS (`internet: true`): relay de 53/udp e 53/tcp para os nameservers do `/etc/resolv.conf` do host, relido quando muda. Funciona com `127.0.0.53`, dnsmasq e troca de rede. No máximo 64 consultas em andamento por VM; as demais são descartadas e o guest repete. Com `internet: false`, o 53 cai no `reject` e o lookup falha na hora.
 
-O `doctor --run` detecta firewall de outra tabela que descarta o tráfego (policy drop ou reject em FORWARD ou INPUT: Docker, ufw, firewalld) e imprime a regra que libera `ohm*`. Um drop em outra tabela vence o accept da `inet ohmlatl`.
+O `doctor --run` detecta firewall de outra tabela que descarta o tráfego (policy drop ou reject em FORWARD ou INPUT: Docker, ufw, firewalld) e imprime a regra que libera `ohm*`. Um drop em outra tabela vence o accept da `inet ohmlatl`. Só contam tabelas `ip` e `inet`: o guest é só IPv4 e roteado, então tabelas `ip6`, `bridge`, `arp` e `netdev` nunca veem o tráfego dele. Tabela `ip` (iptables-nft: Docker, ufw) recebe a correção em `iptables -I`; as outras (firewalld), em `nft insert rule`. As duas valem até o firewall recarregar as próprias regras. Para o tráfego do guest para o gateway (DNS e forwards), o que importa é o INPUT; o FORWARD só afeta a saída para a internet.
 
 ## Imagens
 
@@ -639,7 +640,6 @@ O operador pediu uma opção do `run` com o [firectl](https://github.com/firecra
 ## Pendências
 
 - Os binários de `vendor/podman/v6.1.4/` saíram do git no P0, quando o `cargo xtask assets` passou a compilar o bundle. Eles continuam nos commits antigos do histórico; só reescrevendo o histórico (force push) eles somem de lá, e isso fica para decisão do mantenedor.
-- Até o P3, o `run` e o supervisor recusam um manifest com `vm.network.forward` ("not supported yet"), em vez de ignorar os forwards em silêncio.
 - Testes pendentes do P2, a fazer quando houver outra máquina:
   - o drive inicializa num segundo host, e um UID diferente lá é reportado com a correção;
   - reboot real do host com uma VM rodando: o journal do boot anterior (`journalctl -b -1 -u ohmlatl-<uid>-<nome>`) mostra o Ctrl-Alt-Del e a saída limpa do Firecracker, e o `e2fsck` do boot seguinte sai limpo sem recuperar o journal. O mesmo caminho, via `systemctl stop`, já passou.

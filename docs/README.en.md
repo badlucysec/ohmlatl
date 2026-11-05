@@ -144,7 +144,7 @@ Versions, checksums, and limits are in [vendor/README.md](../vendor/README.md). 
 
 ## Status
 
-Pre-alpha. P0 and P1 are done: `init`, `doctor`, the embedded binaries, image builds and `image`. The runtime (P2: `run`, `stop`, `ps`, `console`, `logs`, `shell`, `exec`, `cp`, the closed network and the DNS relay) is implemented and being validated. Forwards and several VMs working together (P3) do not exist yet; until then `run` refuses a manifest with `forward`. Commands and details may still change.
+Pre-alpha. P0, P1 and P2 are done: `init`, `doctor`, the embedded binaries, image builds, `image` and the runtime (`run`, `stop`, `ps`, `console`, `logs`, `shell`, `exec`, `cp`, the closed network and the DNS relay). P3 is done too: forwards and several VMs working together. Commands and details may still change.
 
 ## License
 
