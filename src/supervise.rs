@@ -1,11 +1,12 @@
-//! The VM supervisor (docs/TECHNICAL.md, "Run e boot", "Stop").
+//! The VM supervisor and its cleanup (docs/TECHNICAL.md, "Run e boot", "Stop").
 //!
-//! P0: run by hand as root, in the foreground. It also does the `launch` steps (tmpfs on
-//! /run/ohmlatl, extraction). The TAP is created by hand and passed with --tap/--guest/--gw.
-//! P2 moves this behind `launch` + `systemd-run` with managed networking.
+//! Runs as root in the system unit `ohmlatl-<uid>-<name>` started by `launch`. Its output goes
+//! to the journal through `log`, which never panics: the cleanup must not depend on stderr.
 
 use crate::assets;
-use crate::util::{cstr, last_err};
+use crate::manifest::{self, parse_size};
+use crate::net;
+use crate::util::{cstr, last_err, log};
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
@@ -24,6 +25,8 @@ const RUN: &str = "/run/ohmlatl";
 const LOG_MAX: u64 = 1 << 20;
 const REPLAY: usize = 64 << 10;
 const STOP_TIMEOUT: Duration = Duration::from_secs(120);
+/// Sent to a second console client before closing it.
+pub const BUSY: &[u8] = b"[ohmlatl] console busy: another client is attached\r\n";
 
 pub struct Args {
     pub uid: u32,
@@ -31,11 +34,20 @@ pub struct Args {
     pub home: PathBuf,
     pub name: String,
     pub tag: String,
-    pub vcpus: u32,
-    pub memory_mib: u32,
-    pub tap: String,
-    pub guest: Ipv4Addr,
-    pub gw: Ipv4Addr,
+    /// `run --vcpus` and `--memory`, over the manifest for this boot.
+    pub vcpus: Option<u32>,
+    pub memory: Option<String>,
+    pub pool: String,
+}
+
+/// What `boot` needs once the manifest is read and the network is up.
+struct Vm {
+    vcpus: u32,
+    memory_mib: u64,
+    user: String,
+    tap: String,
+    gw: Ipv4Addr,
+    guest: Ipv4Addr,
 }
 
 pub fn valid_name(s: &str) -> bool {
@@ -104,17 +116,10 @@ impl Serial {
 
 pub fn run(a: Args) -> Result<(), String> {
     if unsafe { libc::geteuid() } != 0 {
-        return Err("supervise must run as root (sudo)".into());
+        return Err("supervise must run as root".into());
     }
     if !valid_name(&a.name) || !valid_tag(&a.tag) {
         return Err(format!("invalid image {}:{}", a.name, a.tag));
-    }
-    if !a
-        .tap
-        .strip_prefix("ohm")
-        .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
-    {
-        return Err(format!("invalid TAP name {}", a.tap));
     }
     // Signals go to one thread (sigwait); the jailer gets them unblocked again in pre_exec.
     let mut sigs: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -125,43 +130,120 @@ pub fn run(a: Args) -> Result<(), String> {
         }
         libc::pthread_sigmask(libc::SIG_BLOCK, &sigs, std::ptr::null_mut());
     }
-
-    let bin = prepare_run()?;
-    let id = format!("{}-{}", a.uid, a.name);
+    // `launch` runs the copy in /run/ohmlatl/bin/<sha256>/, next to Firecracker and the kernel.
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let bin = exe.parent().unwrap().to_path_buf();
     let vmdir = Path::new(RUN).join(a.uid.to_string()).join(&a.name);
     for d in [vmdir.parent().unwrap(), &vmdir] {
         mkdir_owned(d, 0o700, a.uid, a.gid)?;
     }
 
+    cleanup(a.uid, &a.name);
+    // The image lock lives until the cleanup has killed Firecracker.
+    let mut held = None;
+    let r = supervise(&a, &bin, &vmdir, &mut held);
+    cleanup(a.uid, &a.name);
+    drop(held);
+    if let Err(e) = &r {
+        log(format!("supervise: {e}"));
+        write_error(&vmdir, a.uid, a.gid, e);
+    }
+    r
+}
+
+/// `error` in the VM directory, for the CLI to print.
+fn write_error(vmdir: &Path, uid: u32, gid: u32, msg: &str) {
+    let p = vmdir.join("error");
+    let _ = fs::remove_file(&p);
+    let r = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600)
+        .open(&p)
+        .and_then(|mut f| {
+            writeln!(f, "{msg}")?;
+            std::os::unix::fs::fchown(&f, Some(uid), Some(gid))
+        });
+    if let Err(e) = r {
+        log(format!("supervise: {}: {e}", p.display()));
+    }
+}
+
+/// Steps 1 to 7 of the supervisor, then the event loop until Firecracker exits.
+fn supervise(a: &Args, bin: &Path, vmdir: &Path, held: &mut Option<OwnedFd>) -> Result<(), String> {
     // The drive is not trusted by root: resolve everything below --home without symlinks.
     let home = open_dir(&a.home)?;
-    let image = openat2(
+    let image = held.insert(openat2(
         &home,
         &format!("images/{}/{}", a.name, a.tag),
         libc::O_RDONLY | libc::O_DIRECTORY,
-    )?;
+    )?);
     if unsafe { libc::flock(image.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(format!("image {}:{} is in use", a.name, a.tag));
     }
-    let rootfs = openat2(&image, "rootfs.luks", libc::O_RDWR)?;
-    let st = fstat(&rootfs)?;
-    if st.st_mode & libc::S_IFMT != libc::S_IFREG || st.st_uid != a.uid {
-        return Err(format!(
-            "rootfs.luks must be a regular file owned by uid {}",
-            a.uid
-        ));
+    let mf = File::from(owned_file(image, "manifest.yaml", libc::O_RDONLY, a.uid)?);
+    let mut text = String::new();
+    mf.take(1 << 20)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("manifest.yaml: {e}"))?;
+    let m = manifest::parse(&text).map_err(|e| format!("manifest.yaml: {e}"))?;
+    if !m.forward.is_empty() {
+        return Err(FORWARD_UNSUPPORTED.into());
     }
+    let vcpus = a.vcpus.unwrap_or(m.vcpus);
+    if !(1..=32).contains(&vcpus) {
+        return Err(format!("--vcpus {vcpus}: want 1 to 32"));
+    }
+    let memory = a.memory.as_deref().unwrap_or(&m.memory);
+    let memory_mib = match parse_size(memory) {
+        Some(b) if b >= 512 << 20 => b >> 20,
+        _ => return Err(format!("memory {memory}: want a size of at least 512MiB")),
+    };
+    let rootfs = owned_file(image, "rootfs.luks", libc::O_RDWR, a.uid)?;
 
-    let jail = Path::new(RUN).join("jail/firecracker").join(&id);
-    let root = jail.join("root");
-    cleanup(&jail, &vmdir);
-    let result = boot(&a, &bin, &root, &vmdir, &rootfs);
-    cleanup(&jail, &vmdir);
-    drop(image);
-    result
+    let id = format!("{}-{}", a.uid, a.name);
+    let net = net::setup(&id, a.uid, &a.pool, m.internet)?;
+    if let Some((udp, tcp)) = net.dns {
+        net::serve_dns(udp, tcp, net.guest);
+    }
+    net::watch_routes();
+    let vm = Vm {
+        vcpus,
+        memory_mib,
+        user: m.user.name,
+        tap: net.tap,
+        gw: net.gw,
+        guest: net.guest,
+    };
+    let root = Path::new(RUN)
+        .join("jail/firecracker")
+        .join(&id)
+        .join("root");
+    boot(a, &vm, bin, &root, vmdir, &rootfs)
 }
 
-fn boot(a: &Args, bin: &Path, root: &Path, vmdir: &Path, rootfs: &OwnedFd) -> Result<(), String> {
+pub const FORWARD_UNSUPPORTED: &str =
+    "vm.network.forward is not supported yet; remove the forwards from the image's manifest.yaml";
+
+/// `rel` below `dir`, opened with `openat2`: a regular file owned by `uid`.
+fn owned_file(dir: &OwnedFd, rel: &str, flags: i32, uid: u32) -> Result<OwnedFd, String> {
+    let fd = openat2(dir, rel, flags)?;
+    let st = fstat(&fd)?;
+    if st.st_mode & libc::S_IFMT != libc::S_IFREG || st.st_uid != uid {
+        return Err(format!("{rel} must be a regular file owned by uid {uid}"));
+    }
+    Ok(fd)
+}
+
+fn boot(
+    a: &Args,
+    vm: &Vm,
+    bin: &Path,
+    root: &Path,
+    vmdir: &Path,
+    rootfs: &OwnedFd,
+) -> Result<(), String> {
     let (master, slave) = pty()?;
 
     fs::create_dir_all(root).map_err(|e| format!("{}: {e}", root.display()))?;
@@ -181,7 +263,7 @@ fn boot(a: &Args, bin: &Path, root: &Path, vmdir: &Path, rootfs: &OwnedFd) -> Re
     File::create(&fc_log).map_err(|e| format!("{}: {e}", fc_log.display()))?;
     chown(&fc_log, a.uid, a.gid, 0o600)?;
 
-    // The unit's cgroup in P2; here, whatever cgroup the supervisor runs in.
+    // The unit's cgroup; without --cgroup the jailer moves Firecracker into it.
     let cgroup = fs::read_to_string("/proc/self/cgroup").map_err(|e| e.to_string())?;
     let parent = cgroup
         .lines()
@@ -220,7 +302,7 @@ fn boot(a: &Args, bin: &Path, root: &Path, vmdir: &Path, rootfs: &OwnedFd) -> Re
     let child = cmd.spawn().map_err(|e| format!("jailer: {e}"))?;
     drop(slave);
     let pid = child.id() as i32;
-    eprintln!("supervise: jailer started (pid {pid})");
+    log(format!("supervise: jailer started (pid {pid})"));
 
     let (tx, rx) = mpsc::channel::<Event>();
     spawn_waiter(child, tx.clone());
@@ -228,17 +310,18 @@ fn boot(a: &Args, bin: &Path, root: &Path, vmdir: &Path, rootfs: &OwnedFd) -> Re
 
     // Copy the serial before InstanceStart so no early output is lost.
     let log_path = vmdir.join("serial.log");
-    let log = OpenOptions::new()
+    let _ = fs::remove_file(&log_path);
+    let serial_log = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
         .mode(0o600)
         .open(&log_path)
-        .map_err(|e| e.to_string())?;
-    chown(&log_path, a.uid, a.gid, 0o600)?;
+        .map_err(|e| format!("{}: {e}", log_path.display()))?;
+    std::os::unix::fs::fchown(&serial_log, Some(a.uid), Some(a.gid)).map_err(|e| e.to_string())?;
     let serial = Arc::new(Mutex::new(Serial {
         ring: VecDeque::new(),
-        log,
+        log: serial_log,
         log_len: 0,
         client: None,
     }));
@@ -246,19 +329,36 @@ fn boot(a: &Args, bin: &Path, root: &Path, vmdir: &Path, rootfs: &OwnedFd) -> Re
     pump_pty(File::from(master), serial.clone());
 
     let api_sock = root.join("run/api.sock");
-    let configured = configure(a, &api_sock);
-    if let Err(e) = configured {
+    if let Err(e) = configure(a, vm, &api_sock) {
         unsafe { libc::kill(pid, libc::SIGKILL) };
         let _ = rx.recv_timeout(Duration::from_secs(5));
         return Err(e);
     }
 
-    fs::write(vmdir.join("ip"), format!("{}\n", a.guest)).map_err(|e| e.to_string())?;
-    chown(&vmdir.join("ip"), a.uid, a.gid, 0o644)?;
+    let ip = vmdir.join("ip");
+    let _ = fs::remove_file(&ip);
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o644)
+        .open(&ip)
+        .and_then(|mut f| {
+            writeln!(f, "{}", vm.guest)?;
+            std::os::unix::fs::fchown(&f, Some(a.uid), Some(a.gid))
+        })
+        .map_err(|e| format!("{}: {e}", ip.display()))?;
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let status = format!(
+        "image {}:{}\nuser {}\ntap {}\ngateway {}\nguest {}\npid {pid}\nstarted {started}\n",
+        a.name, a.tag, vm.user, vm.tap, vm.gw, vm.guest
+    );
     let console = listen(&vmdir.join("console.sock"), a.uid, a.gid)?;
     let ctl = listen(&vmdir.join("ctl.sock"), a.uid, a.gid)?;
     serve_console(console, serial, master_w);
-    serve_ctl(ctl, tx.clone());
+    serve_ctl(ctl, tx.clone(), status);
     std::thread::spawn(move || {
         let mut sig = 0;
         let mut all: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -274,14 +374,10 @@ fn boot(a: &Args, bin: &Path, root: &Path, vmdir: &Path, rootfs: &OwnedFd) -> Re
             }
         }
     });
-    eprintln!(
+    log(format!(
         "supervise: ready: {}:{} on {} (guest {}, gateway {})",
-        a.name, a.tag, a.tap, a.guest, a.gw
-    );
-    eprintln!(
-        "supervise: console: {}",
-        vmdir.join("console.sock").display()
-    );
+        a.name, a.tag, vm.tap, vm.guest, vm.gw
+    ));
 
     let mut deadline: Option<Instant> = None;
     loop {
@@ -290,10 +386,10 @@ fn boot(a: &Args, bin: &Path, root: &Path, vmdir: &Path, rootfs: &OwnedFd) -> Re
             Some(d) => match rx.recv_timeout(d.saturating_duration_since(Instant::now())) {
                 Ok(ev) => ev,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    eprintln!(
+                    log(format!(
                         "supervise: Firecracker did not exit in {}s, killing it",
                         STOP_TIMEOUT.as_secs()
-                    );
+                    ));
                     unsafe { libc::kill(pid, libc::SIGKILL) };
                     deadline = None;
                     continue;
@@ -303,21 +399,23 @@ fn boot(a: &Args, bin: &Path, root: &Path, vmdir: &Path, rootfs: &OwnedFd) -> Re
         };
         match ev {
             Event::Exited(s) => {
-                eprintln!(
+                log(format!(
                     "supervise: Firecracker exited: {}",
                     s.map_or_else(|e| e.to_string(), |s| s.to_string())
-                );
+                ));
                 return Ok(());
             }
             Event::Stop if deadline.is_none() => {
-                eprintln!("supervise: stop: sending Ctrl-Alt-Del");
+                log("supervise: stop: sending Ctrl-Alt-Del");
                 deadline = Some(Instant::now() + STOP_TIMEOUT);
                 if let Err(e) = api(
                     &api_sock,
                     "/actions",
                     r#"{"action_type": "SendCtrlAltDel"}"#,
                 ) {
-                    eprintln!("supervise: SendCtrlAltDel: {e}; killing Firecracker");
+                    log(format!(
+                        "supervise: SendCtrlAltDel: {e}; killing Firecracker"
+                    ));
                     unsafe { libc::kill(pid, libc::SIGKILL) };
                 }
             }
@@ -326,7 +424,7 @@ fn boot(a: &Args, bin: &Path, root: &Path, vmdir: &Path, rootfs: &OwnedFd) -> Re
     }
 }
 
-fn configure(a: &Args, sock: &Path) -> Result<(), String> {
+fn configure(a: &Args, vm: &Vm, sock: &Path) -> Result<(), String> {
     let t0 = Instant::now();
     while !sock.exists() {
         if t0.elapsed() > Duration::from_secs(10) {
@@ -334,7 +432,7 @@ fn configure(a: &Args, sock: &Path) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let boot = cmdline(a.guest, a.gw, &a.name);
+    let boot = cmdline(vm.guest, vm.gw, &a.name);
     api(
         sock,
         "/boot-source",
@@ -350,14 +448,14 @@ fn configure(a: &Args, sock: &Path) -> Result<(), String> {
     api(
         sock,
         "/network-interfaces/eth0",
-        &format!(r#"{{"iface_id": "eth0", "host_dev_name": "{}"}}"#, a.tap),
+        &format!(r#"{{"iface_id": "eth0", "host_dev_name": "{}"}}"#, vm.tap),
     )?;
     api(
         sock,
         "/machine-config",
         &format!(
             r#"{{"vcpu_count": {}, "mem_size_mib": {}}}"#,
-            a.vcpus, a.memory_mib
+            vm.vcpus, vm.memory_mib
         ),
     )?;
     api(sock, "/entropy", "{}")?;
@@ -407,7 +505,7 @@ fn api(sock: &Path, path: &str, body: &str) -> Result<(), String> {
 }
 
 /// `launch` steps 1 and 2: our own tmpfs on /run/ohmlatl, then the binaries in it.
-fn prepare_run() -> Result<PathBuf, String> {
+pub fn prepare_run() -> Result<PathBuf, String> {
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -440,9 +538,63 @@ fn prepare_run() -> Result<PathBuf, String> {
     Ok(bin)
 }
 
-/// Kills nothing (the jailer child is gone or killed by then); unmounts and removes the chroot
-/// and the sockets. Idempotent.
-fn cleanup(jail: &Path, vmdir: &Path) {
+/// `ohmlatl cleanup <uid> <name>`, idempotent: at the end of the supervisor and again as the
+/// unit's `ExecStopPost`, which also runs when the supervisor died.
+pub fn cleanup(uid: u32, name: &str) {
+    let id = format!("{uid}-{name}");
+    kill_unit(&id);
+    unmount_jail(&Path::new(RUN).join("jail/firecracker").join(&id));
+    net::teardown(&id);
+    let vmdir = Path::new(RUN).join(uid.to_string()).join(name);
+    let ssh = vmdir.join("ssh.sock");
+    if ssh.exists() {
+        // The destination is a placeholder that ssh requires.
+        let _ = Command::new("ssh")
+            .args(["-F", "/dev/null", "-o"])
+            .arg(format!("ControlPath={}", ssh.display()))
+            .args(["-O", "exit", "ohmlatl"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    for f in ["ctl.sock", "console.sock", "ssh.sock", "ip"] {
+        let _ = fs::remove_file(vmdir.join(f));
+    }
+}
+
+/// Kills what is left in the unit's cgroup (Firecracker, after a dead supervisor) but this
+/// process, and waits up to 5 s for it to go. Outside the unit (run by hand), kills nothing.
+fn kill_unit(id: &str) {
+    let cg = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    let Some(cg) = cg.lines().find_map(|l| l.strip_prefix("0::/")) else {
+        return;
+    };
+    if !cg.ends_with(&format!("/ohmlatl-{id}.service")) {
+        return;
+    }
+    let procs = Path::new("/sys/fs/cgroup").join(cg).join("cgroup.procs");
+    let me = std::process::id().to_string();
+    for _ in 0..50 {
+        let text = fs::read_to_string(&procs).unwrap_or_default();
+        let others: Vec<i32> = text
+            .lines()
+            .filter(|p| *p != me)
+            .filter_map(|p| p.parse().ok())
+            .collect();
+        if others.is_empty() {
+            return;
+        }
+        for p in others {
+            unsafe { libc::kill(p, libc::SIGKILL) };
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    log(format!("cleanup: processes left in {}", procs.display()));
+}
+
+/// Unmounts the bind mounts and removes the chroot.
+fn unmount_jail(jail: &Path) {
     let root = jail.join("root");
     for f in ["vmlinux", "initramfs.cpio.gz", "rootfs.luks"] {
         let p = root.join(f);
@@ -455,17 +607,14 @@ fn cleanup(jail: &Path, vmdir: &Path) {
             .is_some_and(|m| Path::new(m).starts_with(jail))
     });
     if still {
-        eprintln!(
-            "supervise: {} still has mounts; not removing it",
+        log(format!(
+            "cleanup: {} still has mounts; not removing it",
             jail.display()
-        );
+        ));
     } else if jail.exists()
         && let Err(e) = fs::remove_dir_all(jail)
     {
-        eprintln!("supervise: {}: {e}", jail.display());
-    }
-    for f in ["ctl.sock", "console.sock", "ip"] {
-        let _ = fs::remove_file(vmdir.join(f));
+        log(format!("cleanup: {}: {e}", jail.display()));
     }
 }
 
@@ -475,7 +624,7 @@ fn spawn_waiter(mut child: Child, tx: mpsc::Sender<Event>) {
     });
 }
 
-/// Firecracker's own log stays out of the serial: copy it to our stderr (the journal in P2).
+/// Firecracker's own log stays out of the serial: copy it to the journal.
 fn follow_log(path: PathBuf) {
     std::thread::spawn(move || {
         let Ok(mut f) = File::open(&path) else { return };
@@ -484,7 +633,7 @@ fn follow_log(path: PathBuf) {
             buf.clear();
             match f.read_to_string(&mut buf) {
                 Ok(0) => std::thread::sleep(Duration::from_millis(500)),
-                Ok(_) => buf.lines().for_each(|l| eprintln!("firecracker: {l}")),
+                Ok(_) => buf.lines().for_each(|l| log(format!("firecracker: {l}"))),
                 Err(_) => return,
             }
         }
@@ -509,7 +658,7 @@ fn serve_console(l: UnixListener, serial: Arc<Mutex<Serial>>, master: File) {
             let mut s = serial.lock().unwrap();
             if s.client.is_some() {
                 let mut c = c;
-                let _ = c.write_all(b"ohmlatl: another console client is attached\r\n");
+                let _ = c.write_all(BUSY);
                 continue;
             }
             let start = s.ring.len().saturating_sub(REPLAY);
@@ -535,14 +684,16 @@ fn serve_console(l: UnixListener, serial: Arc<Mutex<Serial>>, master: File) {
     });
 }
 
-/// P0 control socket: `stop` only.
-fn serve_ctl(l: UnixListener, tx: mpsc::Sender<Event>) {
+/// The control socket: `ready` and `status` (the same reply: the socket only exists once the
+/// VM is ready) and `stop`.
+fn serve_ctl(l: UnixListener, tx: mpsc::Sender<Event>, status: String) {
     std::thread::spawn(move || {
         for mut c in l.incoming().flatten() {
             let mut line = String::new();
             let _ = c.set_read_timeout(Some(Duration::from_secs(5)));
             let _ = (&c).take(64).read_to_string(&mut line);
             let reply = match line.trim() {
+                "ready" | "status" => &status,
                 "stop" => {
                     let _ = tx.send(Event::Stop);
                     "ok\n"
@@ -620,7 +771,7 @@ fn bind_file(src: &Path, dst: &Path, ro: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn mkdir_owned(p: &Path, mode: u32, uid: u32, gid: u32) -> Result<(), String> {
+pub fn mkdir_owned(p: &Path, mode: u32, uid: u32, gid: u32) -> Result<(), String> {
     match fs::create_dir(p) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}

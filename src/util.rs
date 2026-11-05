@@ -35,6 +35,11 @@ pub fn cstr(p: &Path) -> CString {
     CString::new(p.as_os_str().as_bytes()).expect("path with NUL")
 }
 
+/// A line on stderr (the journal, in the units) that never panics, even with stderr closed.
+pub fn log(msg: impl std::fmt::Display) {
+    let _ = writeln!(io::stderr(), "{msg}");
+}
+
 pub fn last_err<T>(what: impl std::fmt::Display) -> Result<T, String> {
     Err(format!("{what}: {}", io::Error::last_os_error()))
 }

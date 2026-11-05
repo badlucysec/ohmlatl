@@ -4,8 +4,10 @@ mod doctor;
 mod home;
 mod image;
 mod manifest;
+mod net;
 mod supervise;
 mod util;
+mod vm;
 
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -19,6 +21,15 @@ const USAGE: &str = "usage:
   ohmlatl image inspect|rm <name:tag>
   ohmlatl image resize <name:tag> <size>
   ohmlatl image passwd <name:tag>
+  ohmlatl run <name:tag> [--vcpus n] [--memory n]
+  ohmlatl stop <vm>
+  ohmlatl ps
+  ohmlatl console <vm>
+  ohmlatl logs <vm> [-f]
+  ohmlatl shell <vm> [-- cmd]
+  ohmlatl exec <vm> -- cmd
+  ohmlatl cp <vm>:<path> <local>
+  ohmlatl cp <local> <vm>:<path>
   ohmlatl --version
 
 Every command accepts --home <dir>.";
@@ -69,22 +80,33 @@ fn run(mut args: Vec<String>) -> Result<bool, String> {
         let mut cmd = assets::podman().map_err(|e| format!("embedded podman: {e}"))?;
         return Err(format!("podman: {}", cmd.args(&args[p + 1..]).exec()));
     }
+    // After `--` comes a command for the guest: no flag of ours is taken from it.
+    let tail = args
+        .iter()
+        .position(|a| a == "--")
+        .map(|i| args.split_off(i)[1..].to_vec());
     let home = take(&mut args, "--home")?.map(PathBuf::from);
     let cmd = if args.is_empty() {
         String::new()
     } else {
         args.remove(0)
     };
-    match (cmd.as_str(), args.as_slice()) {
-        ("--version" | "-V", []) => {
+    match (cmd.as_str(), args.as_slice(), tail) {
+        ("shell", [vm], cmd) => vm::ssh(vm, &cmd.unwrap_or_default(), true).map(|()| true),
+        ("exec", [vm], Some(cmd)) if !cmd.is_empty() => vm::ssh(vm, &cmd, false).map(|()| true),
+        (_, _, Some(_)) => {
+            eprintln!("{USAGE}");
+            Ok(false)
+        }
+        ("--version" | "-V", [], None) => {
             println!("ohmlatl {}", env!("CARGO_PKG_VERSION"));
             Ok(true)
         }
-        ("init", [dir]) => home::init(&PathBuf::from(dir)).map(|()| true),
-        ("doctor", []) => doctor::doctor(home.as_deref(), true, true),
-        ("doctor", [f]) if f == "--build" => doctor::doctor(home.as_deref(), true, false),
-        ("doctor", [f]) if f == "--run" => doctor::doctor(home.as_deref(), false, true),
-        ("build", _) => {
+        ("init", [dir], None) => home::init(&PathBuf::from(dir)).map(|()| true),
+        ("doctor", [], None) => doctor::doctor(home.as_deref(), true, true),
+        ("doctor", [f], None) if f == "--build" => doctor::doctor(home.as_deref(), true, false),
+        ("doctor", [f], None) if f == "--run" => doctor::doctor(home.as_deref(), false, true),
+        ("build", _, None) => {
             let a = &mut args;
             let o = build::Opts {
                 file: take(a, "-f")?,
@@ -103,15 +125,51 @@ fn run(mut args: Vec<String>) -> Result<bool, String> {
             }
             build::build(home.as_deref(), o).map(|()| true)
         }
-        ("image", [c]) if c == "ls" => image::ls(home.as_deref()).map(|()| true),
-        ("image", [c, r]) if c == "inspect" => image::inspect(home.as_deref(), r).map(|()| true),
-        ("image", [c, r]) if c == "rm" => image::rm(home.as_deref(), r).map(|()| true),
-        ("image", [c, r, size]) if c == "resize" => {
+        ("image", [c], None) if c == "ls" => image::ls(home.as_deref()).map(|()| true),
+        ("image", [c, r], None) if c == "inspect" => {
+            image::inspect(home.as_deref(), r).map(|()| true)
+        }
+        ("image", [c, r], None) if c == "rm" => image::rm(home.as_deref(), r).map(|()| true),
+        ("image", [c, r, size], None) if c == "resize" => {
             image::resize(home.as_deref(), r, size).map(|()| true)
         }
-        ("image", [c, r]) if c == "passwd" => image::passwd(home.as_deref(), r).map(|()| true),
-        // Internal, P0: the supervisor run by hand (see src/supervise.rs).
-        ("supervise", _) => {
+        ("image", [c, r], None) if c == "passwd" => {
+            image::passwd(home.as_deref(), r).map(|()| true)
+        }
+        ("run", _, None) => {
+            let a = &mut args;
+            let (vcpus, memory) = (take(a, "--vcpus")?, take(a, "--memory")?);
+            match a.as_slice() {
+                [r] => vm::run(home.as_deref(), r, vcpus, memory).map(|()| true),
+                _ => Err("usage: ohmlatl run <name:tag> [--vcpus n] [--memory n]".into()),
+            }
+        }
+        ("stop", [vm], None) => vm::stop(vm).map(|()| true),
+        ("ps", [], None) => vm::ps().map(|()| true),
+        ("console", [vm], None) => vm::console(vm).map(|()| true),
+        ("logs", [vm], None) => vm::logs(vm, false).map(|()| true),
+        ("logs", [a, b], None) if a == "-f" || b == "-f" => {
+            vm::logs(if a == "-f" { b } else { a }, true).map(|()| true)
+        }
+        ("cp", [src, dst], None) => vm::cp(src, dst).map(|()| true),
+        // Internal: `sudo ohmlatl launch` from `run`, then the unit's commands.
+        ("launch", _, None) => {
+            let a = &mut args;
+            let l = vm::Launch {
+                uid: need(take_num(a, "--uid")?, "--uid")?,
+                gid: need(take_num(a, "--gid")?, "--gid")?,
+                home: need(home, "--home")?,
+                image: need(take(a, "--image")?, "--image")?,
+                vcpus: take(a, "--vcpus")?,
+                memory: take(a, "--memory")?,
+                pool: take(a, "--pool")?,
+            };
+            if !a.is_empty() {
+                return Err(format!("unexpected arguments: {}", a.join(" ")));
+            }
+            vm::launch(l).map(|()| true)
+        }
+        ("supervise", _, None) => {
             let a = &mut args;
             let image = need(take(a, "--image")?, "--image")?;
             let (name, tag) = image.split_once(':').ok_or("--image needs <name>:<tag>")?;
@@ -121,16 +179,22 @@ fn run(mut args: Vec<String>) -> Result<bool, String> {
                 home: need(home, "--home")?,
                 name: name.to_string(),
                 tag: tag.to_string(),
-                vcpus: take_num(a, "--vcpus")?.unwrap_or(2),
-                memory_mib: take_num(a, "--memory")?.unwrap_or(1024),
-                tap: need(take(a, "--tap")?, "--tap")?,
-                guest: need(take_num(a, "--guest")?, "--guest")?,
-                gw: need(take_num(a, "--gw")?, "--gw")?,
+                vcpus: take_num(a, "--vcpus")?,
+                memory: take(a, "--memory")?,
+                pool: take(a, "--pool")?.unwrap_or_else(|| "172.31.0.0/16".into()),
             };
             if !a.is_empty() {
                 return Err(format!("unexpected arguments: {}", a.join(" ")));
             }
             supervise::run(s).map(|()| true)
+        }
+        ("cleanup", [uid, name], None) => {
+            let uid: u32 = uid.parse().map_err(|_| format!("cleanup: bad uid {uid}"))?;
+            if unsafe { libc::geteuid() } != 0 || !supervise::valid_name(name) {
+                return Err("usage: ohmlatl cleanup <uid> <name> (as root)".into());
+            }
+            supervise::cleanup(uid, name);
+            Ok(true)
         }
         _ => {
             eprintln!("{USAGE}");

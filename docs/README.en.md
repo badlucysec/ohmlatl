@@ -144,7 +144,7 @@ Versions, checksums, and limits are in [vendor/README.md](../vendor/README.md). 
 
 ## Status
 
-Pre-alpha. P0 is done: `init`, `doctor`, the embedded binaries, and the test boot with Firecracker under the jailer. Image builds (P1) and the runtime (P2) do not exist yet; the documents describe the usability contract and the plan. Commands and details may change during P1 and P2.
+Pre-alpha. P0 and P1 are done: `init`, `doctor`, the embedded binaries, image builds and `image`. The runtime (P2: `run`, `stop`, `ps`, `console`, `logs`, `shell`, `exec`, `cp`, the closed network and the DNS relay) is implemented and being validated. Forwards and several VMs working together (P3) do not exist yet; until then `run` refuses a manifest with `forward`. Commands and details may still change.
 
 ## License
 

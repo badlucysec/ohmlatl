@@ -346,12 +346,12 @@ O mesmo comando serve para a primeira vez e para as seguintes. Não existe estad
 
 CLI (usuário):
 
-1. Acha o diretório do ohmlatl e confere o dono. Valida o manifest. Confere que a imagem existe e que não há VM com esse nome rodando (`ctl.sock` responde). Se houver, falha.
+1. Acha o diretório do ohmlatl e confere o dono. Valida o manifest. Confere que a imagem existe e que não há VM com esse nome rodando (`ctl.sock` responde). Se houver, falha. Se a unit ainda está em `deactivating` (um supervisor que acabou de morrer, com o `ExecStopPost` rodando), espera ela sair: senão o `systemd-run` recusa o nome.
 2. Imprime `internet on|off` e os forwards. A rede (TAP, gateway, IP do guest) só existe depois que o supervisor aloca, então é impressa no passo 5.
 3. Apaga `/run/ohmlatl/<uid>/<nome>/error`, se existir.
 4. `sudo <exe> launch --uid <uid> --gid <gid> --home <realpath do dir> --image <nome>:<tag> [--vcpus n] [--memory n] [--pool <cidr>]`, com `<exe>` = destino de `/proc/self/exe` (o `secure_path` do sudo não inclui o drive nem `~/.local/bin`).
 5. Espera `ready` no `ctl.sock`, que devolve TAP, gateway e IP do guest, e imprime a rede. Enquanto espera, consulta `systemctl show -p ActiveState,Result ohmlatl-<uid>-<nome>`: `failed`, ou `inactive` antes do `ready`, é falha. Nesse caso imprime o `error` ou, se não houver, aponta `sudo journalctl -u ohmlatl-<uid>-<nome>` (unit de sistema; o operador comum não lê o journal dela).
-6. Anexa ao `console.sock`. `Ctrl-]` desanexa.
+6. Anexa ao `console.sock`, com o terminal em modo raw. `Ctrl-]` desanexa. Sem TTY no stdin (script, `</dev/null`), não anexa e indica `ohmlatl console <nome>`: sem terminal não há como mandar o `Ctrl-]`.
 
 `OHMLATL_POOL` (padrão `172.31.0.0/16`) muda a faixa das subnets; a CLI passa o valor como `--pool`, porque o sudo limpa o ambiente.
 
@@ -364,7 +364,7 @@ CLI (usuário):
 
 ```bash
 systemctl reset-failed ohmlatl-<uid>-<nome> 2>/dev/null || true
-systemd-run --unit ohmlatl-<uid>-<nome> \
+systemd-run --quiet --unit ohmlatl-<uid>-<nome> \
   -p Delegate=yes -p KillMode=mixed -p TimeoutStopSec=150 \
   -p 'BindsTo="<unit do mount>"' -p 'After="<unit do mount>"' \
   -p "ExecStopPost=/run/ohmlatl/bin/<sha256>/ohmlatl cleanup <uid> <nome>" \
@@ -397,7 +397,7 @@ jailer --id <uid>-<nome> --exec-file /run/ohmlatl/bin/<sha256>/firecracker \
    - `machine-config`: vcpus e memória;
    - `entropy`: virtio-rng;
    - `actions`: `InstanceStart`.
-7. Grava `ip`, cria `ctl.sock` e `console.sock` com `chown <uid>:<gid>` e modo 0600, responde `ready`. Copia a saída do PTY para o cliente do console e para `serial.log` (buffer circular de 1 MiB, do operador). Ao anexar, o cliente recebe primeiro os últimos 64 KiB do buffer, então o prompt da passphrase aparece mesmo se já tiver sido impresso.
+7. Grava `ip`, cria `ctl.sock` e `console.sock` com `chown <uid>:<gid>` e modo 0600, responde `ready`. O `ctl.sock` só existe depois desse ponto, então `ready` e `status` dão a mesma resposta, uma linha `<chave> <valor>` por campo: `image`, `user`, `tap`, `gateway`, `guest`, `pid` (do Firecracker) e `started` (epoch); `stop` responde `ok`. Um segundo cliente do console recebe `[ohmlatl] console busy: another client is attached` e é desconectado. Copia a saída do PTY para o cliente do console e para `serial.log` (buffer circular de 1 MiB, do operador). Ao anexar, o cliente recebe primeiro os últimos 64 KiB do buffer, então o prompt da passphrase aparece mesmo se já tiver sido impresso.
 
 Cmdline:
 
@@ -447,7 +447,7 @@ Opções de SSH (nada vem do `~/.ssh/config` do operador):
 
 Cleanup (`ohmlatl cleanup <uid> <nome>`), idempotente. Roda no fim do supervisor e de novo no `ExecStopPost`, que também roda quando o supervisor morre:
 
-1. Mata o Firecracker se ainda estiver vivo.
+1. Mata o Firecracker se ainda estiver vivo: `SIGKILL` em todo processo da cgroup da unit que não seja o próprio cleanup, e espera até 5 s ela esvaziar. Só age se o cleanup roda dentro da unit `ohmlatl-<uid>-<nome>` (lido de `/proc/self/cgroup`); rodado à mão, fora dela, não mata nada.
 2. Desmonta os bind mounts e remove o chroot.
 3. Sob o lock de rede, lê `/run/ohmlatl/net/<uid>-<nome>`: remove o TAP, se existir, os elementos `ohm<N>` dos mapas e o gateway de `gws`, e as cadeias `vm<N>_*` (o que não existir é ignorado); se não sobrar nenhum TAP `ohm*`, remove a tabela `inet ohmlatl`; apaga o registro.
 4. Encerra a conexão SSH mestre (`ssh -F /dev/null -o ControlPath=.../ssh.sock -O exit ohmlatl`; o destino é só um placeholder, que o `ssh` exige) e depois remove `ctl.sock`, `console.sock`, `ssh.sock` e `ip`. `serial.log` e `error` ficam até o próximo `run`.
@@ -456,12 +456,12 @@ Cleanup (`ohmlatl cleanup <uid> <nome>`), idempotente. Roda no fim do supervisor
 
 Alocação, sob `flock /run/ohmlatl/net.lock`:
 
-- Antes de alocar, o supervisor confere o pool (`172.31.0.0/16`, ou `OHMLATL_POOL`): se algum endereço ou rota do host que não seja de `ohm*` nem a rota padrão cai dentro dele, recusa subir e manda usar `OHMLATL_POOL`.
+- Antes de alocar, o supervisor confere o pool (`172.31.0.0/16`, ou `OHMLATL_POOL`): se algum endereço ou rota do host (de qualquer tabela) que não seja de `ohm*` nem a rota padrão cai dentro dele, recusa subir e manda usar `OHMLATL_POOL`. "Cai dentro" é um prefixo contido no pool; uma rota mais larga que contém o pool (como a `0.0.0.0/1` de uma VPN) não conta, porque a `/30` da VM é mais específica e vence.
 - O `/30` é o primeiro livre no pool que não pertence a outro registro em `/run/ohmlatl/net/` nem já está atribuído a alguma interface `ohm*` (sobra de um supervisor morto antes do cleanup). É alocado a cada `run`; o guest nunca depende do IP, porque usa `ohmlatl-gateway`. Uma rede remota que usa a mesma faixa mas é alcançada pela rota padrão (por exemplo, uma VPC) não é detectável: nesse caso, configure `OHMLATL_POOL`.
 - TAP `ohm<N>` (primeiro N que não está numa interface nem em nenhum registro de `/run/ohmlatl/net/`): `ip tuntap add dev ohm<N> mode tap user <uid>`, `ip addr add <gw>/30 dev ohm<N>`, `sysctl net.ipv6.conf.ohm<N>.disable_ipv6=1` (pulado se `/proc/sys/net/ipv6` não existe, num host com `ipv6.disable=1`), `ip link set ohm<N> up`.
 - `net.ipv4.ip_forward=1`. Nunca é restaurado: outros serviços (Docker) podem passar a depender dele. Se estava desligado e `/run/ohmlatl/net/forward-was-off` ainda não existe, o supervisor grava esse arquivo e cria a tabela `inet ohmlatl-fwguard` **antes** de ligar o `ip_forward`, sempre sob o lock de rede, com `iifname != "ohm*" oifname != "ohm*" drop` no `forward`, para o host não virar roteador entre as outras interfaces (LAN, VPN). Essa tabela não é apagada pelo cleanup; fica até o reboot. Efeito colateral: um Docker ou libvirt iniciado depois não roteia enquanto ela existir. O `doctor --run` mostra a trava e o comando para tirá-la (`sudo nft delete table inet ohmlatl-fwguard`).
 
-Tabela `inet ohmlatl` (criada se não existe). As regras gerais existem uma vez por tabela, nas cadeias base. Cada VM tem cadeias regulares próprias (`vm<N>_raw`, `vm<N>_nat`, `vm<N>_in`, `vm<N>_fwd`, `vm<N>_out`), alcançadas pelas cadeias base por mapas de veredito indexados pelo nome do TAP. Assim a ordem nunca depende de qual VM subiu primeiro: o `vmap` decide a VM, e só o que a cadeia dela não aceitar cai nas regras gerais que vêm depois. Testado com `nft -c` e com carga e remoção de uma VM num namespace isolado:
+Tabela `inet ohmlatl` (criada se não existe). As regras gerais existem uma vez por tabela, nas cadeias base. Cada VM tem cadeias regulares próprias (`vm<N>_raw`, `vm<N>_nat`, `vm<N>_in`, `vm<N>_fwd`, `vm<N>_out`), alcançadas pelas cadeias base por mapas de veredito indexados pelo nome do TAP. Assim a ordem nunca depende de qual VM subiu primeiro: o `vmap` decide a VM, e só o que a cadeia dela não aceitar cai nas regras gerais que vêm depois. Testado com `nft -c` e com carga e remoção de uma VM num namespace isolado. O nft 1.1.7 não aceita `}` na mesma linha de uma regra, então no arquivo real cada cadeia fecha numa linha própria:
 
 ```text
 table inet ohmlatl {
@@ -514,7 +514,7 @@ Forwards e DNS (supervisor):
 - Cada listener escuta em `<gw>:0` (porta efêmera) com `SO_BINDTODEVICE ohm<N>` e só aceita conexão do IP do guest. Como a porta pública vira efêmera pelo `redirect`, nada colide com um listener `0.0.0.0:<porta>` do host, e o host continua livre para usar essas portas.
 - `to: host:<porta>`: conecta em `127.0.0.1:<porta>`.
 - `to: vm/<nome>:<porta>`: conecta em `<ip>:<porta>`, com o IP lido de `/run/ohmlatl/<uid>/<nome>/ip`. Sem o arquivo (VM parada), fecha a conexão. Só VMs do mesmo UID.
-- DNS (`internet: true`): relay de 53/udp e 53/tcp para os nameservers do `/etc/resolv.conf` do host, relido quando muda. Funciona com `127.0.0.53`, dnsmasq e troca de rede. Com `internet: false`, o 53 cai no `reject` e o lookup falha na hora.
+- DNS (`internet: true`): relay de 53/udp e 53/tcp para os nameservers do `/etc/resolv.conf` do host, relido quando muda. Funciona com `127.0.0.53`, dnsmasq e troca de rede. No máximo 64 consultas em andamento por VM; as demais são descartadas e o guest repete. Com `internet: false`, o 53 cai no `reject` e o lookup falha na hora.
 
 O `doctor --run` detecta firewall de outra tabela que descarta o tráfego (policy drop ou reject em FORWARD ou INPUT: Docker, ufw, firewalld) e imprime a regra que libera `ohm*`. Um drop em outra tabela vence o accept da `inet ohmlatl`.
 
@@ -627,6 +627,19 @@ O binário embute o `THIRD-PARTY.txt`; `ohmlatl licenses` o imprime. Assim a có
 
 O binário do release já traz o kernel e o initramfs padrão embutidos: é um arquivo só. Quem quiser os próprios assets roda `cargo xtask assets` e `cargo build --release` e obtém um binário próprio, com os assets embutidos do mesmo jeito; esse binário não confere com o `SHA256SUMS` do release, por definição.
 
+## firectl (decidido: não embutir)
+
+O operador pediu uma opção do `run` com o [firectl](https://github.com/firecracker-microvm/firectl) embutido, para entrar na VM sem dois terminais. Decisão de 04/11/2026: não embutir. O `run` já anexa o console no mesmo terminal (passo 6 de "Run e boot"), em modo raw, com `Ctrl-]` e `console`; os dois terminais do P0 e do P1 vinham do supervisor manual em primeiro plano. Fatos que pesaram (código do firectl e do firecracker-go-sdk):
+
+- Último release v0.2.0 (13/10/2022, `7614c66`; `main` em `df2fb87`, 16/05/2025), sobre o firecracker-go-sdk v1.0.0, feito para a API do Firecracker v1.0; sem binário publicado (exigiria toolchain Go no `cargo xtask assets`). Licença Apache-2.0.
+- Passa o stdin/stdout do terminal direto ao Firecracker, sem modo raw: a passphrase do LUKS aparece na tela do host, não há tecla para desanexar e o Ctrl-C chega ao Firecracker.
+- Com o jailer, o SDK põe kernel e discos no chroot por hard link (o chroot teria de ficar no drive, montado `nodev`) e não passa `--cgroup-version`/`--parent-cgroup`; na prática só roda sem o jailer. Não configura `cache_type` nem `entropy`.
+- É um processo em primeiro plano fora do `launch`/`systemd-run`: sem supervisor, `ctl.sock`, rede gerenciada, relay de DNS, `flock` da imagem nem cleanup; a VM morreria no logout.
+
 ## Pendências
 
 - Os binários de `vendor/podman/v6.1.4/` saíram do git no P0, quando o `cargo xtask assets` passou a compilar o bundle. Eles continuam nos commits antigos do histórico; só reescrevendo o histórico (force push) eles somem de lá, e isso fica para decisão do mantenedor.
+- Até o P3, o `run` e o supervisor recusam um manifest com `vm.network.forward` ("not supported yet"), em vez de ignorar os forwards em silêncio.
+- Testes pendentes do P2, a fazer quando houver outra máquina:
+  - o drive inicializa num segundo host, e um UID diferente lá é reportado com a correção;
+  - reboot real do host com uma VM rodando: o journal do boot anterior (`journalctl -b -1 -u ohmlatl-<uid>-<nome>`) mostra o Ctrl-Alt-Del e a saída limpa do Firecracker, e o `e2fsck` do boot seguinte sai limpo sem recuperar o journal. O mesmo caminho, via `systemctl stop`, já passou.

@@ -19,7 +19,7 @@ fn say(msg: impl std::fmt::Display) {
     println!("[ohmlatl] {msg}");
 }
 
-fn image_ref(s: &str) -> Result<(&str, &str), String> {
+pub fn image_ref(s: &str) -> Result<(&str, &str), String> {
     match s.split_once(':') {
         Some((n, t)) if valid_name(n) && valid_tag(t) => Ok((n, t)),
         _ => Err(format!("invalid image {s} (want <name>:<tag>)")),

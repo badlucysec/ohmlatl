@@ -2,7 +2,7 @@
 
 🇺🇸 [English](ROADMAP.en.md) · 🇧🇷 [Português](ROADMAP.pt-BR.md) · 🇪🇸 Español
 
-Estado: P0 listo. Este documento es el plan que guía las próximas fases. Los detalles técnicos están en `TECHNICAL.md` (pt-BR).
+Estado: P0 y P1 listos; P2 implementado, en validación. Este documento es el plan que guía las próximas fases. Los detalles técnicos están en `TECHNICAL.md` (pt-BR).
 
 ## Visión
 

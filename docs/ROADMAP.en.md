@@ -2,7 +2,7 @@
 
 🇺🇸 English · 🇧🇷 [Português](ROADMAP.pt-BR.md) · 🇪🇸 [Español](ROADMAP.es.md)
 
-Status: P0 done. This document is the plan that guides the next phases. Technical details are in `TECHNICAL.md` (pt-BR).
+Status: P0 and P1 done; P2 implemented, in validation. This document is the plan that guides the next phases. Technical details are in `TECHNICAL.md` (pt-BR).
 
 ## Vision
 

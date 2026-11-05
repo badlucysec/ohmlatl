@@ -144,7 +144,7 @@ Versiones, checksums y límites están en [vendor/README.md](../vendor/README.md
 
 ## Estado
 
-Pre-alfa. P0 está listo: `init`, `doctor`, los binarios embebidos y el arranque de prueba con Firecracker bajo el jailer. El build de imágenes (P1) y el runtime (P2) todavía no existen; los documentos describen el contrato de usabilidad y el plan. Comandos y detalles pueden cambiar durante P1 y P2.
+Pre-alfa. P0 y P1 están listos: `init`, `doctor`, los binarios embebidos, el build de imágenes e `image`. El runtime (P2: `run`, `stop`, `ps`, `console`, `logs`, `shell`, `exec`, `cp`, la red cerrada y el relay de DNS) está implementado y en validación. Los forwards y varias VMs trabajando juntas (P3) todavía no existen; hasta entonces `run` rechaza un manifest con `forward`. Comandos y detalles todavía pueden cambiar.
 
 ## Licencia
 
