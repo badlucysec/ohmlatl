@@ -122,6 +122,16 @@ vm:
 
 Inside the VM, `ohmlatl-gateway:11434` is the host's Ollama and `ohmlatl-gateway:8080` is the MCP server. Nothing else is reachable. The change takes effect on the next `run`.
 
+## AI agents
+
+The repository ships a skill, in the open Agent Skills format, that teaches coding agents (Claude Code, Codex, Gemini CLI, Cursor, OpenCode, GitHub Copilot, and others) to use `ohmlatl`: every command, the manifest, images, network, and which steps stay with you, such as the passphrase and `sudo`. Install it with:
+
+```bash
+npx skills add badlucysec/ohmlatl
+```
+
+The skill is in [skills/ohmlatl](../skills/ohmlatl/SKILL.md).
+
 ## Principles
 
 - The drive is the computer; the host is the bootloader, and you trust it.

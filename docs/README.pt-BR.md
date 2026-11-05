@@ -122,6 +122,16 @@ vm:
 
 Dentro da VM, `ohmlatl-gateway:11434` é o Ollama do host e `ohmlatl-gateway:8080` é o servidor MCP. Nada mais é alcançável. A mudança vale no próximo `run`.
 
+## Agentes de IA
+
+O repositório traz uma skill, no formato aberto Agent Skills, que ensina agentes de código (Claude Code, Codex, Gemini CLI, Cursor, OpenCode, GitHub Copilot e outros) a usar o `ohmlatl`: todos os comandos, o manifest, as imagens, a rede e quais passos ficam com você, como a passphrase e o `sudo`. Para instalar:
+
+```bash
+npx skills add badlucysec/ohmlatl
+```
+
+A skill fica em [skills/ohmlatl](../skills/ohmlatl/SKILL.md).
+
 ## Princípios
 
 - O drive é o computador; o host é o bootloader, e você confia nele.
